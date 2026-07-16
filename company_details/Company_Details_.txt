@@ -1,0 +1,19 @@
+uSiS Technologies (Sample Training Data)
+
+Company Name: uSiS Technologies
+Headquarters: Coimbatore, Tamil Nadu, India
+Founded: 2007
+
+Overview:
+uSiS Technologies is an IT consulting and software development company providing custom software development, web and mobile applications, AI solutions, ERP, HRMS, business automation, and digital transformation services.
+
+Core Services:
+- Custom Software Development
+- AI Solutions
+- ERP & HRMS
+- Team Augmentation
+- IT Consulting
+- Product Engineering
+
+Technology Stack:
+.NET, React, Angular, Node.js, PHP, Flutter, Python, MySQL, MongoDB, ERPNext, Frappe HR, Azure AI.
