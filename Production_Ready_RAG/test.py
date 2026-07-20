@@ -1,17 +1,17 @@
-from loaders.pdf_loader import PDFLoader
+from loaders.loader import Loader
 
-documents = PDFLoader.load(
-    "company_details/Employee_Policy_Handbook.pdf"
+documents = Loader.load(
+    "Production_Ready_RAG/data/company_info/Employees.csv"
 )
 
-print(f"Total Pages Loaded: {len(documents)}")
+print(f"Loaded {len(documents)} document(s)\n")
 
-for document in documents:
+for doc in documents:
 
-    print(document)
+    print(doc)
 
-    print(document.content[:200])
+    print(doc.metadata)
 
-    print(document.metadata)
+    print(doc.content[:200])
 
     print("-" * 50)
