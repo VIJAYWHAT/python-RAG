@@ -1,13 +1,17 @@
-from loaders.txt_loader import TXTLoader
+from loaders.pdf_loader import PDFLoader
 
-doc = TXTLoader.load("company_details/Company_Details_.txt")
+documents = PDFLoader.load(
+    "company_details/Employee_Policy_Handbook.pdf"
+)
 
-print(doc)
+print(f"Total Pages Loaded: {len(documents)}")
 
-print()
+for document in documents:
 
-print(doc.content[:400])
+    print(document)
 
-print()
+    print(document.content[:200])
 
-print(doc.metadata)
+    print(document.metadata)
+
+    print("-" * 50)
