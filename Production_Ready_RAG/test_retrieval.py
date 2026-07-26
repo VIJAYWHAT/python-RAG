@@ -8,10 +8,11 @@ query = "Where is the company headquarters?"
 
 query_vector = embedding_model.embed_query(query)
 
-results = db.similarity_search(
-    query_embedding=query_vector,
-    n_results=3
-)
-print("Query:", query)
-print()
-print("Results:", results)
+documents = db.similarity_search(query_vector)
+
+print(f"Query: {query}")
+for index, document in enumerate(documents, start=1):
+    print(f"\nResult {index}")
+    print("-" * 50)
+    print(document.content)
+    print(document.metadata)

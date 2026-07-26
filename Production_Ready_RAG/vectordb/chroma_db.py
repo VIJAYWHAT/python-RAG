@@ -64,11 +64,30 @@ class VectorDatabase:
     def similarity_search(
         self,
         query_embedding: List[float],
-        n_results: int = 3):
+        n_results: int = 3
+    ) -> List[Document]:
 
         results = self.collection.query(
             query_embeddings=[query_embedding],
             n_results=n_results
         )
 
-        return results
+        documents = []
+
+        for text, metadata, distance in zip(
+            results["documents"][0],
+            results["metadatas"][0],
+            results["distances"][0]
+        ):
+
+            metadata = metadata.copy()
+            metadata["distance"] = distance
+
+            documents.append(
+                Document(
+                    content=text,
+                    metadata=metadata
+                )
+            )
+
+        return documents
