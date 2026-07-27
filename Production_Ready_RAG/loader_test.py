@@ -1,7 +1,7 @@
 from loaders.loader import Loader
 
 documents = Loader.load(
-    "Production_Ready_RAG/data/company_info/Employees.csv"
+    "Production_Ready_RAG/data/company_info/HR_FAQ.txt"
 )
 
 print(f"Loaded {len(documents)} document(s)\n")

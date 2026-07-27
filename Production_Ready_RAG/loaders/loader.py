@@ -36,3 +36,4 @@ class Loader:
             return SpreadsheetLoader.load(file_path)
 
         raise ValueError(f"Unsupported file type: {extension}")
+    
