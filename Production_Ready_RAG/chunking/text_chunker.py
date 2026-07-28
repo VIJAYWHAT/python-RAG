@@ -1,11 +1,14 @@
 from typing import List
 
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+
 from models.document import Document
 
 
 class TextChunker:
     """
-    Splits documents into smaller overlapping chunks.
+    Splits documents into smaller overlapping chunks
+    using LangChain's RecursiveCharacterTextSplitter.
     """
 
     def __init__(
@@ -14,8 +17,10 @@ class TextChunker:
         chunk_overlap: int = 200
     ):
 
-        self.chunk_size = chunk_size
-        self.chunk_overlap = chunk_overlap
+        self.text_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
+        )
 
     def split_documents(
         self,
@@ -26,46 +31,21 @@ class TextChunker:
 
         for document in documents:
 
-            chunks = self.split_text(document)
-
-            chunked_documents.extend(chunks)
-
-        return chunked_documents
-
-    def split_text(
-        self,
-        document: Document
-    ) -> List[Document]:
-
-        content = document.content
-
-        metadata = document.metadata
-
-        chunks = []
-
-        start = 0
-
-        chunk_number = 1
-
-        while start < len(content):
-
-            end = start + self.chunk_size
-
-            chunk_text = content[start:end]
-
-            chunk_metadata = metadata.copy()
-
-            chunk_metadata["chunk"] = chunk_number
-
-            chunks.append(
-                Document(
-                    content=chunk_text,
-                    metadata=chunk_metadata
-                )
+            chunks = self.text_splitter.split_text(
+                document.content
             )
 
-            start = end - self.chunk_overlap
+            for index, chunk in enumerate(chunks, start=1):
 
-            chunk_number += 1
+                metadata = document.metadata.copy()
 
-        return chunks
+                metadata["chunk"] = index
+
+                chunked_documents.append(
+                    Document(
+                        content=chunk,
+                        metadata=metadata
+                    )
+                )
+
+        return chunked_documents
