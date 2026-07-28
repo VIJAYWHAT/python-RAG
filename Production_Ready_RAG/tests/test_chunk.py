@@ -10,7 +10,7 @@ chunker = TextChunker(
     chunk_overlap=50
 )
 
-chunks = chunker.split_documents(documents)
+chunks = chunker.chunk_documents(documents)
 
 print(f"Total Chunks: {len(chunks)}\n")
 

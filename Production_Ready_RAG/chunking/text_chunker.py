@@ -22,7 +22,7 @@ class TextChunker:
             chunk_overlap=chunk_overlap,
         )
 
-    def split_documents(
+    def chunk_documents(
         self,
         documents: List[Document]
     ) -> List[Document]:
