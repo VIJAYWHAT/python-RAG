@@ -1,36 +1,46 @@
-from typing import List
-from models.document import Document
-
-
 class PromptBuilder:
 
-    def build_prompt(
+    def build_messages(
         self,
-        query: str,
-        documents: List[Document]
-    ) -> str:
+        question: str,
+        documents: list,
+        history: list
+    ) -> list:
 
         context = "\n\n".join(
             document.content
             for document in documents
         )
 
-        prompt = f"""
-You are a HR AI to Usis Technologies.
+        system_prompt = f"""
+You are an HR representative AI Assistant of Usis Technologies.
 
-Answer ONLY using the provided context.
+Answer the user's question using ONLY the provided context.
 
-If the answer cannot be found in the context, say:
+If the answer cannot be found in the context,
+reply:
 
-"I couldn't find that information in the provided documents."
+"I don't have enough information to answer that."
 
 Context:
+
 {context}
-
-Question:
-{query}
-
-Answer:
 """
 
-        return prompt.strip()
+        messages = [
+            {
+                "role": "system",
+                "content": system_prompt.strip()
+            }
+        ]
+
+        messages.extend(history)
+
+        messages.append(
+            {
+                "role": "user",
+                "content": question
+            }
+        )
+
+        return messages
