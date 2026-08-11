@@ -6,7 +6,8 @@ from guardrails.guardrail_logger import GuardrailLogger
 
 from context_checker.context_checker import ContextChecker
 from hr_queries.hr_query_store import HRQueryStore
-
+from language.language_detector import LanguageDetector
+from language.query_translator import QueryTranslator
 
 class ChatService:
 
@@ -20,7 +21,9 @@ class ChatService:
         guardrails,
         guardrail_logger: GuardrailLogger,
         context_checker: ContextChecker,
-        hr_query_store: HRQueryStore
+        hr_query_store: HRQueryStore,
+        language_detector: LanguageDetector,
+        query_translator: QueryTranslator
     ):
 
         self.llm = llm
@@ -36,13 +39,16 @@ class ChatService:
 
         self.context_checker = context_checker
         self.hr_query_store = hr_query_store
+        self.language_detector = language_detector
+        self.query_translator = query_translator
 
     def ask(
         self,
         question: str,
         session_id: str = "default-session"
     ):
-
+        
+        language = self.language_detector.detect_language(question)
         # --------------------------------
         # 1. Get session-specific memory
         # --------------------------------
@@ -115,11 +121,20 @@ class ChatService:
             )
 
         # --------------------------------
+        # Translate for Retrieval
+        # --------------------------------
+
+        retrieval_question = (
+            self.query_translator.translate_to_english(
+                search_question
+            )
+        )
+        # --------------------------------
         # 5. Retrieve Documents
         # --------------------------------
 
         documents = self.retriever.retrieve(
-            search_question
+            retrieval_question
         )
 
         # --------------------------------
@@ -157,11 +172,7 @@ class ChatService:
         # 7. Build Prompt
         # --------------------------------
 
-        messages = self.prompt_builder.build_messages(
-            question,
-            documents,
-            history
-        )
+        messages = self.prompt_builder.build_messages(question,documents,history,language)
 
         # --------------------------------
         # 8. Generate Answer

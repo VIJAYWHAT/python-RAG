@@ -38,7 +38,9 @@ query_rewriter = QueryRewriter(
 )
 
 memory = ChatMemory()
-guardrails = GuardrailService()
+guardrails = GuardrailService(
+    scope_llm=rewrite_llm
+)
 guardrail_logger = GuardrailLogger()
 
 context_checker = ContextChecker(

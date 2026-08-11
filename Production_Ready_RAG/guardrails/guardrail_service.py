@@ -3,10 +3,21 @@ from guardrails.guardrail_result import (
     GuardrailStatus
 )
 
+from llm.base_llm import BaseLLM
+
 
 class GuardrailService:
 
-    def __init__(self):
+    def __init__(
+        self,
+        scope_llm: BaseLLM
+    ):
+
+        self.scope_llm = scope_llm
+
+        # --------------------------------
+        # Prompt Injection Patterns
+        # --------------------------------
 
         self.injection_patterns = [
 
@@ -24,42 +35,20 @@ class GuardrailService:
             "jailbreak"
         ]
 
-        self.allowed_topics = [
-
-            "hr",
-            "human resources",
-            "leave",
-            "salary",
-            "payroll",
-            "employee",
-            "employment",
-            "policy",
-            "policies",
-            "benefits",
-            "benefit",
-            "attendance",
-            "working hours",
-            "holiday",
-            "holidays",
-            "overtime",
-            "maternity",
-            "paternity",
-            "insurance",
-            "grievance",
-            "disciplinary",
-            "termination",
-            "resignation",
-            "rights",
-            "faq",
-            "company policy"
-        ]
+    # --------------------------------
+    # Prompt Injection Guardrail
+    # --------------------------------
 
     def check_injection(
         self,
         question: str
     ) -> GuardrailResult:
 
-        normalized_question = question.lower().strip()
+        normalized_question = (
+            question
+            .lower()
+            .strip()
+        )
 
         for pattern in self.injection_patterns:
 
@@ -80,29 +69,146 @@ class GuardrailService:
             reason="No prompt injection detected"
         )
 
+    # --------------------------------
+    # HR Scope Guardrail
+    # --------------------------------
+
     def check_scope(
         self,
         question: str
     ) -> GuardrailResult:
 
-        normalized_question = question.lower().strip()
+        scope_prompt = f"""
+Determine whether the user's question is related to HR.
 
-        if not any(
-            topic in normalized_question
-            for topic in self.allowed_topics
-        ):
+The question may be written in any language, including:
+
+- English
+- Hindi
+- Urdu
+- Arabic
+- Malayalam
+- Tamil
+- Bengali
+
+HR-related topics include:
+
+- Leave
+- Benefits
+- Employee rights
+- HR policies
+- Code of conduct
+- Attendance
+- Payroll
+- Recruitment
+- Employee FAQs
+- Company HR procedures
+- Working hours
+- Holidays
+- Overtime
+- Maternity and paternity
+- Insurance
+- Grievances
+- Disciplinary procedures
+- Termination
+- Resignation
+- Employment-related questions
+
+Important:
+
+The question may be a short conversational follow-up.
+
+Examples:
+
+"What about casual leave?"
+"What about the approval?"
+"How many days?"
+"What are the conditions?"
+
+If the conversation context is not provided, determine whether
+the question itself appears to be related to HR.
+
+The question must be considered HR-related even if it is written
+in a language other than English.
+
+Do not answer the question.
+
+Return ONLY one of these two values:
+
+ALLOW
+
+or
+
+OUT_OF_SCOPE
+
+User question:
+{question}
+"""
+
+        try:
+
+            response = self.scope_llm.generate(
+                messages=[
+                    {
+                        "role": "user",
+                        "content": scope_prompt
+                    }
+                ],
+                temperature=0,
+                max_tokens=5
+            )
+
+            result = (
+                response.content
+                .strip()
+                .upper()
+            )
+
+            # --------------------------------
+            # LLM Classification
+            # --------------------------------
+
+            if result == "ALLOW":
+
+                return GuardrailResult(
+                    status=GuardrailStatus.ALLOW,
+                    reason="Question is within the HR domain"
+                )
+
+            if result == "OUT_OF_SCOPE":
+
+                return GuardrailResult(
+                    status=GuardrailStatus.OUT_OF_SCOPE,
+                    reason="Question is outside the HR domain",
+                    message=(
+                        "I can assist with HR policies, "
+                        "employee rights, benefits, FAQs, "
+                        "and other company-related HR information."
+                    )
+                )
+
+            # --------------------------------
+            # Unexpected LLM Response
+            # --------------------------------
 
             return GuardrailResult(
                 status=GuardrailStatus.OUT_OF_SCOPE,
-                reason="Question is outside the HR domain",
+                reason="Unable to validate HR scope",
                 message=(
-                    "I can assist with HR policies, employee rights, "
-                    "benefits, FAQs, and other company-related "
-                    "HR information."
+                    "I can assist with HR policies, "
+                    "employee rights, benefits, FAQs, "
+                    "and other company-related HR information."
                 )
             )
 
-        return GuardrailResult(
-            status=GuardrailStatus.ALLOW,
-            reason="Question is within the HR domain"
-        )
+        except Exception:
+
+            return GuardrailResult(
+                status=GuardrailStatus.OUT_OF_SCOPE,
+                reason="HR scope validation failed",
+                message=(
+                    "I can assist with HR policies, "
+                    "employee rights, benefits, FAQs, "
+                    "and other company-related HR information."
+                )
+            )

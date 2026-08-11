@@ -4,7 +4,8 @@ class PromptBuilder:
         self,
         question: str,
         documents: list,
-        history: list
+        history: list,
+        language="English"
     ) -> list:
 
         context = "\n\n".join(
