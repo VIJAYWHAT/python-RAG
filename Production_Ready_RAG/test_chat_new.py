@@ -10,6 +10,7 @@ from guardrails.guardrail_service import GuardrailService
 from guardrails.guardrail_logger import GuardrailLogger
 from context_checker.context_checker import ContextChecker
 from hr_queries.hr_query_store import HRQueryStore
+from memory.memory_manager import MemoryManager
 
 
 # Initialize Components
@@ -45,12 +46,13 @@ context_checker = ContextChecker(
 )
 
 hr_query_store = HRQueryStore()
+memory_manager = MemoryManager()
 
 chat = ChatService(
     retriever=retriever,
     prompt_builder=prompt_builder,
     llm=answer_llm,
-    memory=memory,
+    memory_manager=memory_manager,
     query_rewriter=query_rewriter,
     guardrails=guardrails,
     guardrail_logger=guardrail_logger,
@@ -71,7 +73,7 @@ while True:
         print("\nExiting chat...")
         break
 
-    response = chat.ask(question)
+    response = chat.ask(question, session_id="demo-session-001")
 
     print("=" * 70)
     print("AI Response")
