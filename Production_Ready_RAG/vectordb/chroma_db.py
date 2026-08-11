@@ -91,3 +91,40 @@ class VectorDatabase:
             )
 
         return documents
+    
+    def similarity_search_with_scores(
+        self,
+        query_embedding,
+        n_results: int = 3
+    ):
+        results = self.collection.query(
+            query_embeddings=[query_embedding],
+            n_results=n_results,
+            include=[
+                "documents",
+                "metadatas",
+                "distances"
+            ]
+        )
+
+        documents = []
+
+        for i, content in enumerate(
+            results["documents"][0]
+        ):
+
+            document = Document(
+                content=content,
+                metadata=results["metadatas"][0][i]
+            )
+
+            distance = results["distances"][0][i]
+
+            documents.append(
+                {
+                    "document": document,
+                    "distance": distance
+                }
+            )
+
+        return documents

@@ -8,6 +8,9 @@ from chat.chat_service import ChatService
 from query_rewriter.query_rewriter import QueryRewriter
 from guardrails.guardrail_service import GuardrailService
 from guardrails.guardrail_logger import GuardrailLogger
+from context_checker.context_checker import ContextChecker
+from hr_queries.hr_query_store import HRQueryStore
+
 
 # Initialize Components
 embedding_model = EmbeddingModel()
@@ -36,6 +39,13 @@ query_rewriter = QueryRewriter(
 memory = ChatMemory()
 guardrails = GuardrailService()
 guardrail_logger = GuardrailLogger()
+
+context_checker = ContextChecker(
+    llm=rewrite_llm
+)
+
+hr_query_store = HRQueryStore()
+
 chat = ChatService(
     retriever=retriever,
     prompt_builder=prompt_builder,
@@ -43,7 +53,9 @@ chat = ChatService(
     memory=memory,
     query_rewriter=query_rewriter,
     guardrails=guardrails,
-    guardrail_logger=guardrail_logger
+    guardrail_logger=guardrail_logger,
+    context_checker=context_checker,
+    hr_query_store=hr_query_store
 )
 
 print("=" * 70)
@@ -67,11 +79,15 @@ while True:
     print(response.answer)
 
     if response.llm_response:
-
         print()
-        print("Prompt Tokens : ", response.llm_response.prompt_tokens)
-        print("Completion Tokens : ",response.llm_response.completion_tokens)
-        print("Total Tokens : ",response.llm_response.total_tokens)
+        print("Prompt Tokens      : ", response.llm_response.prompt_tokens)
+        print("Completion Tokens  : ", response.llm_response.completion_tokens)
+        print("Total Tokens       : ", response.llm_response.total_tokens)
+
+    else:
+        print()
+        print("LLM Tokens         : N/A")
+        print("Reason             : LLM was not called")
 
     # print("\nConversation History")
     # print("=" * 70)
