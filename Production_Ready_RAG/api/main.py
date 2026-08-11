@@ -182,7 +182,8 @@ def chat_endpoint(
 
     response = chat.ask(
         question=request.question,
-        session_id=scoped_session_id
+        user_id=user_id,
+        session_id=request.session_id
     )
 
     # --------------------------------

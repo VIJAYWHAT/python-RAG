@@ -6,8 +6,10 @@ from guardrails.guardrail_logger import GuardrailLogger
 
 from context_checker.context_checker import ContextChecker
 from hr_queries.hr_query_store import HRQueryStore
+
 from language.language_detector import LanguageDetector
 from language.query_translator import QueryTranslator
+
 
 class ChatService:
 
@@ -30,6 +32,7 @@ class ChatService:
         self.retriever = retriever
         self.prompt_builder = prompt_builder
 
+        # Persistent conversation memory
         self.memory_manager = memory_manager
 
         self.query_rewriter = query_rewriter
@@ -39,28 +42,36 @@ class ChatService:
 
         self.context_checker = context_checker
         self.hr_query_store = hr_query_store
+
         self.language_detector = language_detector
         self.query_translator = query_translator
 
     def ask(
         self,
         question: str,
+        user_id: str,
         session_id: str = "default-session"
     ):
-        
-        language = self.language_detector.detect_language(question)
+
         # --------------------------------
-        # 1. Get session-specific memory
+        # 1. Detect User Language
         # --------------------------------
 
-        memory = self.memory_manager.get_memory(
-            session_id
+        language = self.language_detector.detect_language(
+            question
         )
 
-        history = memory.get_messages()
+        # --------------------------------
+        # 2. Get Session-Specific Memory
+        # --------------------------------
+
+        history = self.memory_manager.get_messages(
+            user_id=user_id,
+            session_id=session_id
+        )
 
         # --------------------------------
-        # 2. Prompt Injection Guardrail
+        # 3. Prompt Injection Guardrail
         # --------------------------------
 
         injection_result = self.guardrails.check_injection(
@@ -83,7 +94,7 @@ class ChatService:
             )
 
         # --------------------------------
-        # 3. Query Rewriting
+        # 4. Query Rewriting
         # --------------------------------
 
         if history:
@@ -98,7 +109,7 @@ class ChatService:
             search_question = question
 
         # --------------------------------
-        # 4. Scope Guardrail
+        # 5. Scope Guardrail
         # --------------------------------
 
         scope_result = self.guardrails.check_scope(
@@ -121,7 +132,7 @@ class ChatService:
             )
 
         # --------------------------------
-        # Translate for Retrieval
+        # 6. Translate Query for Retrieval
         # --------------------------------
 
         retrieval_question = (
@@ -129,8 +140,9 @@ class ChatService:
                 search_question
             )
         )
+
         # --------------------------------
-        # 5. Retrieve Documents
+        # 7. Retrieve Documents
         # --------------------------------
 
         documents = self.retriever.retrieve(
@@ -138,17 +150,17 @@ class ChatService:
         )
 
         # --------------------------------
-        # 6. Check Context
+        # 8. Check Context
         # --------------------------------
 
         answerable = self.context_checker.is_answerable(
-            question=search_question,
+            question=retrieval_question,
             documents=documents
         )
 
         if not answerable:
 
-            query_id = self.hr_query_store.save_query(
+            self.hr_query_store.save_query(
                 question=question,
                 session_id=session_id
             )
@@ -169,13 +181,23 @@ class ChatService:
             )
 
         # --------------------------------
-        # 7. Build Prompt
+        # 9. Build Prompt
         # --------------------------------
+        #
+        # IMPORTANT:
+        # Use the ORIGINAL question here so the LLM
+        # can answer in the user's language.
+        #
 
-        messages = self.prompt_builder.build_messages(question,documents,history,language)
+        messages = self.prompt_builder.build_messages(
+            question,
+            documents,
+            history,
+            language
+        )
 
         # --------------------------------
-        # 8. Generate Answer
+        # 10. Generate Answer
         # --------------------------------
 
         llm_response = self.llm.generate(
@@ -183,19 +205,29 @@ class ChatService:
         )
 
         # --------------------------------
-        # 9. Save Conversation
+        # 11. Save User Message
         # --------------------------------
 
-        memory.add_user_message(
-            question
-        )
-
-        memory.add_assistant_message(
-            llm_response.content
+        self.memory_manager.add_user_message(
+            user_id=user_id,
+            session_id=session_id,
+            content=question,
+            language=language
         )
 
         # --------------------------------
-        # 10. Return Response
+        # 12. Save Assistant Message
+        # --------------------------------
+
+        self.memory_manager.add_assistant_message(
+            user_id=user_id,
+            session_id=session_id,
+            content=llm_response.content,
+            language=language
+        )
+
+        # --------------------------------
+        # 13. Return Response
         # --------------------------------
 
         return ChatResponse(
