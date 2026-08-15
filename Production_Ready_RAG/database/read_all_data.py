@@ -4,7 +4,7 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
-DB_PATH = PROJECT_ROOT / "data" / "hr_employee.db"
+DB_PATH = PROJECT_ROOT / "database" / "hr_queries.db"
 
 
 def print_table(cursor, table_name):
@@ -46,8 +46,8 @@ if __name__ == "__main__":
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
 
-    print_table(cursor, "employees")
-    print_table(cursor, "leave_balances")
-    print_table(cursor, "leave_transactions")
+    print_table(cursor, "hr_queries")
+    # print_table(cursor, "leave_balances")
+    # print_table(cursor, "leave_transactions")
 
     conn.close()

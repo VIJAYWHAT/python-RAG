@@ -24,9 +24,17 @@ from context_checker.context_checker import ContextChecker
 from hr_queries.hr_query_store import HRQueryStore
 from memory.memory_manager import MemoryManager
 
-from api.schemas import ChatRequest, ChatResponseSchema
+from api.schemas import (
+    ChatRequest,
+    ChatResponseSchema,
+    LoginRequest,
+    LoginResponse,
+    MeResponse
+)
 
 from auth.auth_service import AuthService, security
+
+from employee.employee_data_service import EmployeeDataService
 
 from session.session_manager import SessionManager
 from api.rate_limiter import RateLimiter
@@ -42,12 +50,16 @@ app = FastAPI(
 )
 app.add_middleware(
     CORSMiddleware,
+    # The Flutter mobile app has no browser origin, so CORS does
+    # not apply to it. These entries are for the web build and
+    # local tooling. Tighten this list before production.
     allow_origins=[
         "http://localhost:3000",
-        "http://localhost:5173"
+        "http://localhost:5173",
+        "http://localhost:8080"
     ],
     allow_credentials=True,
-    allow_methods=["POST", "GET"],
+    allow_methods=["POST", "GET", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type"]
 )
 
@@ -216,7 +228,7 @@ async def chat(sid, data):
         # --------------------------------
 
         response = await asyncio.to_thread(
-            chat.ask,
+            chat_service.ask,
             question=question,
             user_id=user_id,
             session_id=session_id
@@ -397,11 +409,13 @@ query_translator = QueryTranslator(
     llm=rewrite_llm
 )
 
+employee_data_service = EmployeeDataService()
+
 # --------------------------------------------------
 # Chat Service
 # --------------------------------------------------
 
-chat = ChatService(
+chat_service = ChatService(
     retriever=retriever,
     prompt_builder=prompt_builder,
     llm=answer_llm,
@@ -427,6 +441,102 @@ def health_check():
         "status": "ok",
         "service": "HR AI Chatbot"
     }
+
+
+# --------------------------------------------------
+# Authentication
+# --------------------------------------------------
+
+@app.post(
+    "/api/login",
+    response_model=LoginResponse
+)
+def login(request: LoginRequest):
+    """
+    Employees log in with their employee ID and password.
+
+    Demo credentials:
+        employee-001 / Test@123
+        employee-002 / Test@123
+
+    The returned token is used both as the REST Bearer token and
+    in the Socket.IO connection handshake:
+
+        auth: { "token": "<token>" }
+    """
+
+    print("\n========================================")
+    print("[LOGIN]")
+    print("========================================")
+    print(f"Employee ID : {request.employee_id}")
+
+    try:
+
+        token = AuthService.login(
+            employee_id=request.employee_id,
+            password=request.password
+        )
+
+    except ValueError as error:
+
+        print(f"[LOGIN] Rejected: {error}")
+
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid employee ID or password"
+        )
+
+    # Look up the display details so the app can greet the user
+    profile = employee_data_service.get_profile(
+        request.employee_id
+    ) or {}
+
+    print(f"[LOGIN] Token issued for {request.employee_id}")
+    print(f"[LOGIN] Name          : {profile.get('name')}")
+    print("========================================")
+
+    return LoginResponse(
+        token=token,
+        employee_id=request.employee_id,
+        name=profile.get("name"),
+        designation=profile.get("designation"),
+        department=profile.get("department")
+    )
+
+
+@app.post("/api/logout")
+def logout(credentials=Depends(security)):
+
+    AuthService.logout(credentials.credentials)
+
+    return {"status": "ok"}
+
+
+@app.get(
+    "/api/me",
+    response_model=MeResponse
+)
+def me(credentials=Depends(security)):
+
+    user_id = AuthService.authenticate(credentials)
+
+    profile = employee_data_service.get_profile(user_id)
+
+    if not profile:
+
+        raise HTTPException(
+            status_code=404,
+            detail="Employee record not found"
+        )
+
+    return MeResponse(
+        employee_id=profile.get("employee_id"),
+        name=profile.get("name"),
+        designation=profile.get("designation"),
+        department=profile.get("department"),
+        manager_name=profile.get("manager_name"),
+        location=profile.get("location")
+    )
 
 # --------------------------------------------------
 # RAG TEST API
@@ -458,7 +568,7 @@ def rag_test(
     # Run complete ChatService
     # --------------------------------
 
-    response = chat.ask(
+    response = chat_service.ask(
         question=request.question,
         user_id=user_id,
         session_id=request.session_id
