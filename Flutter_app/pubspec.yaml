@@ -37,6 +37,10 @@ dependencies:
   http: ^1.6.0
   socket_io_client: ^3.1.6
 
+  # Renders the assistant's markdown answers (bold, tables,
+  # bullet lists, headings) instead of showing raw ** and |---|.
+  gpt_markdown: ^1.1.8
+
 dev_dependencies:
   flutter_test:
     sdk: flutter
