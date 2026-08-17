@@ -153,6 +153,16 @@ class MemoryManager:
         session_id: str,
         limit: int = 20
     ) -> List[Dict]:
+        #
+        # IMPORTANT:
+        # We need the MOST RECENT `limit` messages, returned in
+        # chronological order.
+        #
+        # "ORDER BY id ASC LIMIT 20" returned the OLDEST 20, so
+        # once a session passed 20 messages the history froze at
+        # the start of the conversation and follow-up questions
+        # stopped resolving correctly.
+        #
 
         connection = self._get_connection()
 
@@ -164,14 +174,24 @@ class MemoryManager:
                 role,
                 content
 
-            FROM chat_messages
+            FROM (
 
-            WHERE user_id = ?
-              AND session_id = ?
+                SELECT
+                    id,
+                    role,
+                    content
+
+                FROM chat_messages
+
+                WHERE user_id = ?
+                  AND session_id = ?
+
+                ORDER BY id DESC
+
+                LIMIT ?
+            )
 
             ORDER BY id ASC
-
-            LIMIT ?
             """,
             (
                 user_id,
