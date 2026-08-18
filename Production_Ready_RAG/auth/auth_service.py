@@ -7,26 +7,33 @@ security = HTTPBearer()
 
 class AuthService:
 
-    DEMO_TOKENS = {
+    DEMO_USERS = {
         "demo-token-001": "employee-001",
-        "demo-token-002": "employee-002"
+        "demo-token-002": "employee-002",
     }
 
-    @classmethod
-    def authenticate(
-        cls,
-        credentials: HTTPAuthorizationCredentials
-    ) -> str:
+    @staticmethod
+    def authenticate_token(token: str):
+
+        user_id = AuthService.DEMO_USERS.get(token)
+
+        if not user_id:
+            raise ValueError("Invalid authentication token")
+
+        return user_id
+
+    @staticmethod
+    def authenticate(credentials):
 
         token = credentials.credentials
 
-        user_id = cls.DEMO_TOKENS.get(token)
+        return AuthService.authenticate_token(token)
+
+        user_id = AuthService.DEMO_USERS.get(token)
 
         if not user_id:
-
-            raise HTTPException(
-                status_code=401,
-                detail="Invalid or expired token"
+            raise ValueError(
+                "Invalid authentication token"
             )
 
         return user_id
