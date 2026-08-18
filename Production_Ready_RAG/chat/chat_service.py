@@ -9,6 +9,13 @@ from hr_queries.hr_query_store import HRQueryStore
 
 from language.language_detector import LanguageDetector
 from language.query_translator import QueryTranslator
+from employee.employee_query_detector import (
+    EmployeeQueryDetector
+)
+
+from employee.employee_context_builder import (
+    EmployeeContextBuilder
+)
 
 
 class ChatService:
@@ -31,6 +38,7 @@ class ChatService:
         self.llm = llm
         self.retriever = retriever
         self.prompt_builder = prompt_builder
+        self.employee_context_builder = (EmployeeContextBuilder())
 
         # Persistent conversation memory
         self.memory_manager = memory_manager
@@ -52,7 +60,48 @@ class ChatService:
         user_id: str,
         session_id: str = "default-session"
     ):
+        query_type = (
+            EmployeeQueryDetector.get_query_type(
+                question
+            )
+        )
 
+        is_employee_query = (
+            EmployeeQueryDetector.is_employee_query(
+                question
+            )
+        )
+        
+        if is_employee_query:
+
+            print("")
+            print("========================================")
+            print("[EMPLOYEE QUERY]")
+            print("========================================")
+
+            print(
+                f"Employee ID : {user_id}"
+            )
+
+            print(
+                f"Question    : {question}"
+            )
+
+            print(
+                f"Query Type  : {query_type}"
+            )
+
+            employee_context = (
+                self.employee_context_builder.build(
+                    employee_id=user_id,
+                    query_type=query_type
+                )
+            )
+
+            print(
+                f"Employee Context: {employee_context}"
+            )
+        
         # --------------------------------
         # 1. Detect User Language
         # --------------------------------
@@ -77,6 +126,8 @@ class ChatService:
         injection_result = self.guardrails.check_injection(
             question
         )
+        
+        
 
         if injection_result.status != GuardrailStatus.ALLOW:
 
