@@ -5,7 +5,8 @@ from typing import Dict, Any
 @dataclass
 class Document:
     """
-    Represents a single document or document chunk in the RAG pipeline.
+    Represents a single document or document chunk
+    in the RAG pipeline.
     """
 
     content: str

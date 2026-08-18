@@ -4,6 +4,7 @@ from enum import Enum
 
 class GuardrailStatus(Enum):
     ALLOW = "allow"
+    GREETING = "greeting"
     BLOCKED = "blocked"
     OUT_OF_SCOPE = "out_of_scope"
 

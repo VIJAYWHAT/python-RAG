@@ -94,6 +94,46 @@ class ChatService:
             )
 
         # --------------------------------
+        # 4. General Conversation
+        # --------------------------------
+
+        general_result = (
+            self.guardrails.check_general_conversation(
+                question
+            )
+        )
+
+        if general_result.message:
+
+            print(
+                f"[GENERAL CHAT] "
+                f"Question={question} | "
+                f"Reason={general_result.reason}"
+            )
+
+            self.memory_manager.add_user_message(
+                user_id=user_id,
+                session_id=session_id,
+                content=question,
+                language=language
+            )
+
+            self.memory_manager.add_assistant_message(
+                user_id=user_id,
+                session_id=session_id,
+                content=general_result.message,
+                language=language
+            )
+
+            return ChatResponse(
+                answer=general_result.message,
+                source_documents=[],
+                llm_response=None,
+                guardrail_status="greeting",
+                guardrail_reason=general_result.reason
+            )
+            
+        # --------------------------------
         # 4. Query Rewriting
         # --------------------------------
 
@@ -103,6 +143,17 @@ class ChatService:
                 question,
                 history
             )
+            
+            print("\n========================================")
+            print("[CHAT DEBUG]")
+            print("========================================")
+            print(f"Original Question     : {question}")
+            print(f"Session ID            : {session_id}")
+            print(f"User ID               : {user_id}")
+            print(f"Detected Language     : {language}")
+            print(f"History Count         : {len(history)}")
+            print(f"Rewritten Question    : {search_question}")
+            print("========================================\n")
 
         else:
 
@@ -116,7 +167,47 @@ class ChatService:
             search_question
         )
 
-        if scope_result.status != GuardrailStatus.ALLOW:
+        # --------------------------------
+        # Handle Greeting
+        # --------------------------------
+
+        if scope_result.status == GuardrailStatus.GREETING:
+
+            greeting_message = (
+                "Hi! How can I help you with your HR-related questions?"
+            )
+
+            # Save greeting in conversation memory
+            self.memory_manager.add_user_message(
+                user_id=user_id,
+                session_id=session_id,
+                content=question,
+                language=language
+            )
+
+            self.memory_manager.add_assistant_message(
+                user_id=user_id,
+                session_id=session_id,
+                content=greeting_message,
+                language=language
+            )
+
+            return ChatResponse(
+                answer=greeting_message,
+                source_documents=[],
+                llm_response=None,
+                guardrail_status="greeting",
+                guardrail_reason=(
+                    "General greeting or chatbot assistance request"
+                )
+            )
+
+
+        # --------------------------------
+        # Handle Out Of Scope
+        # --------------------------------
+
+        if scope_result.status == GuardrailStatus.OUT_OF_SCOPE:
 
             self.guardrail_logger.log_out_of_scope(
                 question=question,
@@ -140,6 +231,13 @@ class ChatService:
                 search_question
             )
         )
+        print("\n========================================")
+        print("[RETRIEVAL DEBUG]")
+        print("========================================")
+        print(f"Original Question  : {question}")
+        print(f"Search Question    : {search_question}")
+        print(f"Retrieval Question : {retrieval_question}")
+        print("========================================\n")
 
         # --------------------------------
         # 7. Retrieve Documents
@@ -148,6 +246,19 @@ class ChatService:
         documents = self.retriever.retrieve(
             retrieval_question
         )
+        print("\n========================================")
+        print("[RAG DEBUG]")
+        print("========================================")
+        print(f"Question          : {question}")
+        print(f"Retrieved Docs    : {len(documents)}")
+
+        for index, document in enumerate(documents):
+            print(
+                f"Document {index + 1}: "
+                f"{document}"
+            )
+
+        print("========================================\n")
 
         # --------------------------------
         # 8. Check Context
@@ -156,6 +267,12 @@ class ChatService:
         answerable = self.context_checker.is_answerable(
             question=retrieval_question,
             documents=documents
+        )
+        
+        print(
+            f"[CONTEXT RESULT] "
+            f"Question={question} | "
+            f"Answerable={answerable}"
         )
 
         if not answerable:

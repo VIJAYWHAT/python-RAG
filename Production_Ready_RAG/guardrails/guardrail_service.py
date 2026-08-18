@@ -35,6 +35,32 @@ class GuardrailService:
             "jailbreak"
         ]
 
+        # --------------------------------
+        # General Conversation Patterns
+        # --------------------------------
+
+        self.greeting_patterns = [
+
+            "hi",
+            "hello",
+            "hey",
+            "good morning",
+            "good afternoon",
+            "good evening",
+            "good night"
+        ]
+
+        self.help_patterns = [
+
+            "how can you help me",
+            "how can you help",
+            "what can you do",
+            "what can you help with",
+            "how can i use you",
+            "what are you able to do",
+            "what do you do"
+        ]
+
     # --------------------------------
     # Prompt Injection Guardrail
     # --------------------------------
@@ -70,6 +96,56 @@ class GuardrailService:
         )
 
     # --------------------------------
+    # General Conversation Detection
+    # --------------------------------
+
+    def check_general_conversation(
+        self,
+        question: str
+    ) -> GuardrailResult:
+
+        normalized_question = (
+            question
+            .lower()
+            .strip()
+            .rstrip("?")
+            .strip()
+        )
+
+        # Greeting
+        if normalized_question in self.greeting_patterns:
+
+            return GuardrailResult(
+                status=GuardrailStatus.ALLOW,
+                reason="General greeting",
+                message=(
+                    "Hi! How can I help you with your "
+                    "HR-related questions?"
+                )
+            )
+
+        # Help / capability request
+        if normalized_question in self.help_patterns:
+
+            return GuardrailResult(
+                status=GuardrailStatus.ALLOW,
+                reason="General chatbot assistance request",
+                message=(
+                    "Hi! I can help you with HR policies, "
+                    "leave, benefits, employee rights, "
+                    "company information, FAQs, attendance, "
+                    "payroll, working hours, and other "
+                    "company-related HR information. "
+                    "What would you like to know?"
+                )
+            )
+
+        return GuardrailResult(
+            status=GuardrailStatus.OUT_OF_SCOPE,
+            reason="Not a general conversation request"
+        )
+
+    # --------------------------------
     # HR Scope Guardrail
     # --------------------------------
 
@@ -79,21 +155,20 @@ class GuardrailService:
     ) -> GuardrailResult:
 
         scope_prompt = f"""
-Determine whether the user's question is related to HR.
+You are an HR chatbot scope classifier.
 
-The question may be written in any language, including:
+Determine whether the user's question is relevant to
+the HR assistant or the company's internal information.
 
-- English
-- Hindi
-- Urdu
-- Arabic
-- Malayalam
-- Tamil
-- Bengali
+IMPORTANT:
+The question should be classified as ALLOW if it is related
+to any of the following:
 
-HR-related topics include:
-
+HR topics:
 - Leave
+- Annual leave
+- Casual leave
+- Sick leave
 - Benefits
 - Employee rights
 - HR policies
@@ -106,7 +181,8 @@ HR-related topics include:
 - Working hours
 - Holidays
 - Overtime
-- Maternity and paternity
+- Maternity
+- Paternity
 - Insurance
 - Grievances
 - Disciplinary procedures
@@ -114,32 +190,61 @@ HR-related topics include:
 - Resignation
 - Employment-related questions
 
-Important:
+Company information:
+- Company overview
+- Company profile
+- Company history
+- Company services
+- Company locations
+- Organization information
+- Departments
+- Employees
+- Company-related FAQs
+- Internal company information
 
-The question may be a short conversational follow-up.
+Conversational requests:
+- Greetings
+- Asking how the assistant can help
+- Asking what the assistant can do
 
-Examples:
+The user may write in any language, including:
+English, Hindi, Tamil, Malayalam, Bengali,
+Urdu, Arabic, or other languages.
 
-"What about casual leave?"
-"What about the approval?"
-"How many days?"
-"What are the conditions?"
+Short questions and follow-up questions should also be
+considered valid if they are related to HR or company
+information.
 
-If the conversation context is not provided, determine whether
-the question itself appears to be related to HR.
+Examples of ALLOW:
 
-The question must be considered HR-related even if it is written
-in a language other than English.
+"What is the leave policy?"
+"Tell me about casual leave"
+"How many annual leaves do employees get?"
+"Can you tell me about the company?"
+"What services does the company provide?"
+"What are the working hours?"
+"How can you help me?"
+"Hi"
+"छुट्टी की नीति क्या है?"
+"விடுப்பு கொள்கை என்ன?"
 
-Do not answer the question.
+Examples of OUT_OF_SCOPE:
 
-Return ONLY one of these two values:
+"What is today's cricket score?"
+"What is the weather today?"
+"Who won the football match?"
+"Write me a movie script"
+"How do I cook biryani?"
+
+Return ONLY:
 
 ALLOW
 
 or
 
 OUT_OF_SCOPE
+
+Do not provide any explanation.
 
 User question:
 {question}
@@ -155,7 +260,7 @@ User question:
                     }
                 ],
                 temperature=0,
-                max_tokens=5
+                max_tokens=50
             )
 
             result = (
@@ -164,51 +269,69 @@ User question:
                 .upper()
             )
 
+            print(
+                f"[GUARDRAIL DEBUG] "
+                f"Question={question} | "
+                f"Raw Response={repr(response.content)} | "
+                f"Parsed={repr(result)}"
+            )
+
             # --------------------------------
-            # LLM Classification
+            # ALLOW
             # --------------------------------
 
             if result == "ALLOW":
 
                 return GuardrailResult(
                     status=GuardrailStatus.ALLOW,
-                    reason="Question is within the HR domain"
+                    reason="Question is within HR/company scope"
                 )
+
+            # --------------------------------
+            # OUT OF SCOPE
+            # --------------------------------
 
             if result == "OUT_OF_SCOPE":
 
                 return GuardrailResult(
                     status=GuardrailStatus.OUT_OF_SCOPE,
-                    reason="Question is outside the HR domain",
+                    reason="Question is outside HR/company scope",
                     message=(
                         "I can assist with HR policies, "
-                        "employee rights, benefits, FAQs, "
-                        "and other company-related HR information."
+                        "employee rights, benefits, company "
+                        "information, FAQs, and other "
+                        "company-related HR information."
                     )
                 )
 
             # --------------------------------
-            # Unexpected LLM Response
+            # Unexpected Response
             # --------------------------------
 
-            return GuardrailResult(
-                status=GuardrailStatus.OUT_OF_SCOPE,
-                reason="Unable to validate HR scope",
-                message=(
-                    "I can assist with HR policies, "
-                    "employee rights, benefits, FAQs, "
-                    "and other company-related HR information."
-                )
+            print(
+                f"[GUARDRAIL] Unexpected scope response: "
+                f"{repr(response.content)}"
             )
 
-        except Exception:
+            # IMPORTANT:
+            # Do not automatically block a request just
+            # because the classifier failed.
+            #
+            # Allow it to continue to RAG.
+            #
+            return GuardrailResult(
+                status=GuardrailStatus.ALLOW,
+                reason="Scope classifier returned unexpected response"
+            )
+
+        except Exception as e:
+
+            print(
+                f"[GUARDRAIL ERROR] "
+                f"{type(e).__name__}: {e}"
+            )
 
             return GuardrailResult(
-                status=GuardrailStatus.OUT_OF_SCOPE,
-                reason="HR scope validation failed",
-                message=(
-                    "I can assist with HR policies, "
-                    "employee rights, benefits, FAQs, "
-                    "and other company-related HR information."
-                )
+                status=GuardrailStatus.ALLOW,
+                reason="Scope validation failed; allowing request for RAG validation"
             )

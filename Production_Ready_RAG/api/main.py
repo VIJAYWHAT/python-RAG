@@ -1,5 +1,5 @@
 from fastapi import FastAPI
-
+import os
 from embeddings.embedding_model import EmbeddingModel
 from vectordb.chroma_db import VectorDatabase
 from retriever.retriever import Retriever
@@ -67,13 +67,13 @@ prompt_builder = PromptBuilder()
 
 # Query rewriting LLM
 rewrite_llm = GroqLLM(
-    model="llama-3.1-8b-instant"
+    model="openai/gpt-oss-20b"
 )
 
 
 # Answer generation LLM
 answer_llm = GroqLLM(
-    model="llama-3.3-70b-versatile"
+    model="openai/gpt-oss-120b"
 )
 
 

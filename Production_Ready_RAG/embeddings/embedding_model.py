@@ -1,5 +1,7 @@
 from typing import List
+
 from sentence_transformers import SentenceTransformer
+
 from models.document import Document
 
 
@@ -9,21 +11,41 @@ class EmbeddingModel:
         self,
         model_name: str = "all-MiniLM-L6-v2"
     ):
-        self.model = SentenceTransformer(model_name)
 
-    def embed_text(self, text: str):
-        return self.model.encode(text)
+        self.model = SentenceTransformer(
+            model_name
+        )
 
-    def embed_documents(self, documents: List[Document]):
+    def embed_text(
+        self,
+        text: str
+    ):
+
+        return self.model.encode(
+            text
+        ).tolist()
+
+    def embed_documents(
+        self,
+        documents: List[Document]
+    ):
+
         texts = [
             document.content
             for document in documents
         ]
 
-        return self.model.encode(texts)
-    
+        embeddings = self.model.encode(
+            texts
+        )
+
+        return embeddings.tolist()
+
     def embed_query(
         self,
         query: str
     ):
-        return self.model.encode(query).tolist()
+
+        return self.model.encode(
+            query
+        ).tolist()

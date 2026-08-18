@@ -30,7 +30,7 @@ rewrite_llm = GroqLLM(
 )
 
 answer_llm = GroqLLM(
-    model="llama-3.3-70b-versatile"
+    model="openai/gpt-oss-120b"
 )
 
 query_rewriter = QueryRewriter(

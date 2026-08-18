@@ -1,6 +1,8 @@
 from typing import List
 
-from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_text_splitters import (
+    RecursiveCharacterTextSplitter
+)
 
 from models.document import Document
 
@@ -17,9 +19,11 @@ class TextChunker:
         chunk_overlap: int = 200
     ):
 
-        self.text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=chunk_size,
-            chunk_overlap=chunk_overlap,
+        self.text_splitter = (
+            RecursiveCharacterTextSplitter(
+                chunk_size=chunk_size,
+                chunk_overlap=chunk_overlap,
+            )
         )
 
     def chunk_documents(
@@ -35,11 +39,14 @@ class TextChunker:
                 document.content
             )
 
-            for index, chunk in enumerate(chunks, start=1):
+            for index, chunk in enumerate(
+                chunks,
+                start=1
+            ):
 
                 metadata = document.metadata.copy()
 
-                metadata["chunk"] = index
+                metadata["chunk_id"] = index
 
                 chunked_documents.append(
                     Document(

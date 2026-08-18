@@ -1,66 +1,77 @@
+import chromadb
+
 from typing import List
-import uuid
 
-from chromadb import PersistentClient
 from models.document import Document
-
 
 
 class VectorDatabase:
 
     def __init__(
         self,
-        db_path: str = "./database",
-        collection_name: str = "company_documents"
+        persist_directory: str = "data/vector_db",
+        collection_name: str = "hr_knowledge_base"
     ):
 
-        self.client = PersistentClient(path=db_path)
+        self.client = chromadb.PersistentClient(
+            path=persist_directory
+        )
 
-        self.collection = self.client.get_or_create_collection(
-            name=collection_name
+        self.collection = (
+            self.client.get_or_create_collection(
+                name=collection_name
+            )
         )
 
     def add_documents(
         self,
         documents: List[Document],
-        embeddings
+        embeddings: List[List[float]]
     ):
 
-        ids = [
-            str(uuid.uuid4())
-            for _ in documents
-        ]
+        if not documents:
+            return
 
-        texts = [
-            document.content
-            for document in documents
-        ]
+        ids = []
+        texts = []
+        metadatas = []
 
-        metadata = [
-            document.metadata
-            for document in documents
-        ]
+        for index, document in enumerate(
+            documents
+        ):
 
-        self.collection.add(
+            source = document.metadata.get(
+                "source",
+                "unknown"
+            )
+
+            chunk_id = document.metadata.get(
+                "chunk_id",
+                index
+            )
+
+            document_id = (
+                f"{source}_{chunk_id}"
+            )
+
+            document_id = (
+                document_id
+                .replace("\\", "_")
+                .replace("/", "_")
+                .replace(" ", "_")
+            )
+
+            ids.append(document_id)
+            texts.append(document.content)
+            metadatas.append(document.metadata)
+
+        self.collection.upsert(
             ids=ids,
             documents=texts,
             embeddings=embeddings,
-            metadatas=metadata
+            metadatas=metadatas
         )
-        print(f"IDs        : {len(ids)}")
-        print(f"Texts      : {len(texts)}")
-        print(f"Metadata   : {len(metadata)}")
-        print(f"Embeddings : {len(embeddings)}")
-        
-    def count(self):
-        return self.collection.count()
-    
-    def reset_collection(self):
-        self.client.delete_collection("company_documents")
-        self.collection = self.client.get_or_create_collection(
-            name="company_documents"
-        )
-    
+
     def similarity_search(
         self,
         query_embedding: List[float],
@@ -74,57 +85,38 @@ class VectorDatabase:
 
         documents = []
 
-        for text, metadata, distance in zip(
-            results["documents"][0],
-            results["metadatas"][0],
-            results["distances"][0]
+        result_documents = results.get(
+            "documents",
+            [[]]
+        )[0]
+
+        result_metadatas = results.get(
+            "metadatas",
+            [[]]
+        )[0]
+
+        result_distances = results.get(
+            "distances",
+            [[]]
+        )[0]
+
+        for index, content in enumerate(
+            result_documents
         ):
 
-            metadata = metadata.copy()
-            metadata["distance"] = distance
+            metadata = (
+                result_metadatas[index] or {}
+            )
+
+            metadata["distance"] = (
+                result_distances[index]
+            )
 
             documents.append(
                 Document(
-                    content=text,
+                    content=content,
                     metadata=metadata
                 )
-            )
-
-        return documents
-    
-    def similarity_search_with_scores(
-        self,
-        query_embedding,
-        n_results: int = 3
-    ):
-        results = self.collection.query(
-            query_embeddings=[query_embedding],
-            n_results=n_results,
-            include=[
-                "documents",
-                "metadatas",
-                "distances"
-            ]
-        )
-
-        documents = []
-
-        for i, content in enumerate(
-            results["documents"][0]
-        ):
-
-            document = Document(
-                content=content,
-                metadata=results["metadatas"][0][i]
-            )
-
-            distance = results["distances"][0][i]
-
-            documents.append(
-                {
-                    "document": document,
-                    "distance": distance
-                }
             )
 
         return documents
