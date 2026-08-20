@@ -1,0 +1,80 @@
+# Single-service compose file for a staging host.
+#
+# Deliberately one replica: the rate limiter and the verified-token
+# cache live in process memory (see core/ttl_cache.py and
+# api/rate_limiter.py), so a second replica would double the
+# effective rate limit and halve the identity cache hit rate. Scale
+# out only after both move to a shared store.
+#
+# Run behind a TLS-terminating reverse proxy. The employee's HR
+# access token is in every request header, so plain http between the
+# proxy and the internet is not an option.
+
+services:
+  hr-assistant:
+    build: .
+    image: ejadah-hr-assistant:latest
+    container_name: ejadah-hr-assistant
+    restart: unless-stopped
+
+    # Secrets come from the environment, never from a baked-in file.
+    # The Dockerfile deletes any .env that made it into the context.
+    env_file:
+      - .env
+
+    ports:
+      # Bound to localhost: the reverse proxy is the only thing that
+      # should be able to reach this directly.
+      - "127.0.0.1:8000:8000"
+
+    volumes:
+      # The vector store, the chat transcripts and the unanswered-
+      # question log all live here and must survive a redeploy.
+      - ./data:/app/data
+      - ./logs:/app/logs
+
+    # The container writes only to data/ and logs/.
+    read_only: true
+
+    tmpfs:
+      - /tmp
+
+    security_opt:
+      - no-new-privileges:true
+
+    cap_drop:
+      - ALL
+
+    # Chroma plus the embedding model needs roughly a gigabyte
+    # resident; below ~1.5G the process is OOM-killed during startup.
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+        reservations:
+          memory: 1G
+
+    logging:
+      driver: json-file
+      options:
+        # Log lines carry employee numbers and, under DEBUG, HR
+        # content. Keep the on-disk window small and ship them to a
+        # system with access controls instead.
+        max-size: "20m"
+        max-file: "5"
+
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - |
+          import sys, urllib.request
+          sys.exit(0 if urllib.request.urlopen(
+              "http://127.0.0.1:8000/health", timeout=4
+          ).status == 200 else 1)
+      interval: 30s
+      timeout: 5s
+      # The embedding model and Chroma load before the port opens.
+      start_period: 90s
+      retries: 3

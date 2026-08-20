@@ -1,9 +1,13 @@
+from core.logging_config import get_logger, log_personal
 from guardrails.guardrail_result import (
     GuardrailResult,
     GuardrailStatus
 )
 
 from llm.base_llm import BaseLLM
+
+
+logger = get_logger(__name__)
 
 
 class GuardrailService:
@@ -269,11 +273,12 @@ User question:
 
             result = raw.upper()
 
-            print(
-                f"[GUARDRAIL DEBUG] "
-                f"Question={question} | "
-                f"Raw Response={repr(raw)} | "
-                f"Parsed={repr(result)}"
+            log_personal(
+                logger,
+                "Scope classifier | question=%s raw=%r parsed=%r",
+                question,
+                raw,
+                result
             )
 
             decision = self._parse_scope(result)
@@ -298,9 +303,10 @@ User question:
                     )
                 )
 
-            print(
-                f"[GUARDRAIL] Unexpected scope response: {repr(raw)} "
-                f"- allowing the request to continue to RAG."
+            logger.warning(
+                "Scope classifier returned %r; allowing the request "
+                "through to retrieval",
+                raw
             )
 
             # Never block just because the classifier failed.
@@ -313,9 +319,11 @@ User question:
 
         except Exception as e:
 
-            print(
-                f"[GUARDRAIL ERROR] "
-                f"{type(e).__name__}: {e}"
+            logger.error(
+                "Scope classifier failed (%s: %s); failing open to "
+                "retrieval",
+                type(e).__name__,
+                e
             )
 
             return GuardrailResult(

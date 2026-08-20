@@ -1,0 +1,16 @@
+.venv/
+__pycache__/
+**/__pycache__/
+*.pyc
+.env
+.git/
+.vscode/
+.idea/
+logs/
+data/chat_memory.db
+data/chat_memory.db-*
+data/hr_queries.db
+data/hr_employee.db
+test_*.py
+tests/
+verify_employee_flow.py

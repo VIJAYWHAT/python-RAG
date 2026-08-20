@@ -36,7 +36,12 @@ chunker = TextChunker(
 )
 
 chunks = chunker.chunk_documents(documents)
+# Store in ChromaDB
+db = VectorDatabase()
 
+# Clear previous collection
+db.reset_collection()
+print(f"Collection '{db.collection.name}' has been reset.")
 # Generate embeddings
 embedding_model = EmbeddingModel()
 vectors = embedding_model.embed_documents(chunks)
@@ -45,19 +50,15 @@ print(f"Documents : {len(documents)}")
 print(f"Chunks    : {len(chunks)}")
 print(f"Vectors   : {len(vectors)}")
 
-# Store in ChromaDB
-db = VectorDatabase()
 
-# Clear previous collection
-db.reset_collection()
 
-# Add new documents
-db.add_documents(chunks, vectors)
+# # Add new documents
+# db.add_documents(chunks, vectors)
 
-results = db.collection.get()
+# results = db.collection.get()
 
-print(f"\nCount      : {db.count()}")
-print(f"Stored IDs : {len(results['ids'])}")
-print(f"IDs        : {results['ids']}")
+# print(f"\nCount      : {db.count()}")
+# print(f"Stored IDs : {len(results['ids'])}")
+# print(f"IDs        : {results['ids']}")
 
-print("\nAll documents stored successfully.")
+# print("\nAll documents stored successfully.")

@@ -118,3 +118,12 @@ xlrd==2.0.2
 xxhash==3.8.1
 yarl==1.24.5
 zstandard==0.25.0
+
+# ------------------------------------------------------------------
+# Added for the production build
+# ------------------------------------------------------------------
+# Socket.IO transport. These were already installed in the virtual
+# environment but missing from this file, so a fresh `pip install -r`
+# produced an app that could not import api.main.
+python-socketio==5.16.4
+python-engineio==4.13.5

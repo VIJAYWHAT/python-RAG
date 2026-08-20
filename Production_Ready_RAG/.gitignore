@@ -1,0 +1,23 @@
+# Secrets - never commit
+.env
+*.pem
+*.key
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Runtime state (employee data lives in these)
+logs/
+data/chat_memory.db
+data/chat_memory.db-shm
+data/chat_memory.db-wal
+data/hr_queries.db
+data/hr_employee.db
+data/vector_db/
+
+# Editors
+.vscode/
+.idea/

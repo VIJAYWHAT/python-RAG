@@ -1,809 +1,300 @@
-import asyncio
+"""
+Application entry point.
+
+    uvicorn api.main:socket_app --host 0.0.0.0 --port 8000
+
+`socket_app` is the ASGI app that serves both the REST routes and
+the Socket.IO transport on the same port, which is what the Flutter
+client expects.
+
+Exception handling policy: no internal detail leaves this process.
+Every handler logs the real cause and returns a fixed, safe message.
+An HR assistant's stack traces would otherwise describe the HR
+gateway, the vector store and the prompt structure to anyone who
+can trigger an error.
+"""
+
+from __future__ import annotations
+
+import time
+from contextlib import asynccontextmanager
+
 import socketio
-
-from fastapi import FastAPI, Depends, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.trustedhost import TrustedHostMiddleware
+from fastapi.responses import JSONResponse
+from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.middleware.gzip import GZipMiddleware
 
-from embeddings.embedding_model import EmbeddingModel
-from vectordb.chroma_db import VectorDatabase
-from retriever.retriever import Retriever
-from prompts.prompt_builder import PromptBuilder
+from api import container as container_module
+from api.routes import auth_routes, chat_routes, health_routes
+from api.socket_server import sio
+from config.settings import settings
+from core.errors import AppError
+from core.logging_config import configure_logging, get_logger
+from ejadah.ejadah_client import close_ejadah_client, get_ejadah_client
 
-from llm.groq_llm import GroqLLM
 
-from memory.chat_memory import ChatMemory
-from chat.chat_service import ChatService
-from query_rewriter.query_rewriter import QueryRewriter
+configure_logging()
 
-from guardrails.guardrail_service import GuardrailService
-from guardrails.guardrail_logger import GuardrailLogger
+logger = get_logger(__name__)
 
-from context_checker.context_checker import ContextChecker
 
-from hr_queries.hr_query_store import HRQueryStore
-from memory.memory_manager import MemoryManager
+# ==================================================================
+# Lifespan
+# ==================================================================
 
-from api.schemas import (
-    ChatRequest,
-    ChatResponseSchema,
-    LoginRequest,
-    LoginResponse,
-    MeResponse
-)
 
-from auth.auth_service import AuthService, security
+@asynccontextmanager
+async def lifespan(app: FastAPI):
 
-from employee.employee_data_service import EmployeeDataService
+    logger.info(
+        "Starting the Ejadah HR AI Assistant | environment=%s "
+        "employee_data_source=%s",
+        settings.environment,
+        settings.employee_data_source
+    )
 
-from session.session_manager import SessionManager
-from api.rate_limiter import RateLimiter
+    problems = settings.validate_for_production()
 
-from language.language_detector import LanguageDetector
-from language.query_translator import QueryTranslator
+    if problems:
+
+        for problem in problems:
+            logger.error("CONFIGURATION: %s", problem)
+
+        if settings.is_production:
+
+            raise RuntimeError(
+                "Refusing to start in production with an unsafe "
+                "configuration: " + "; ".join(problems)
+            )
+
+        logger.warning(
+            "Continuing despite %s configuration warning(s) because "
+            "ENVIRONMENT is not 'production'.",
+            len(problems)
+        )
+
+    # Fail fast: build the pipeline (embedding model, vector store,
+    # LLM clients) before the port opens.
+    get_ejadah_client()
+
+    container_module.build()
+
+    # Worth stating explicitly, because a Socket.IO handshake refused
+    # on CORS grounds looks from the app like "the assistant will not
+    # connect" with nothing in between to explain it.
+    #
+    # A client that sends NO Origin header - which is every native
+    # mobile client, including the Flutter app's dart:io WebSocket -
+    # is always allowed. This list only gates clients that do send
+    # one: browsers (the Flutter web build) and some test tooling.
+    logger.info(
+        "Socket.IO origins: %s | REST CORS origins: %s "
+        "(clients that send no Origin header, i.e. the mobile app, "
+        "are always allowed)",
+        settings.socket_cors_allow_origins or "<none>",
+        settings.cors_allow_origins or "<none>"
+    )
+
+    logger.info(
+        "Ready on %s:%s",
+        settings.host,
+        settings.port
+    )
+
+    try:
+        yield
+
+    finally:
+
+        logger.info("Shutting down.")
+
+        close_ejadah_client()
+
+
+# ==================================================================
+# App
+# ==================================================================
 
 
 app = FastAPI(
-    title="HR AI Chatbot API",
-    description="RAG-based HR chatbot with guardrails",
-    version="1.0.0"
+    title="Ejadah HR AI Assistant",
+    description=(
+        "RAG-based HR assistant for the Ejadah employee app.\n\n"
+        "Authentication uses the employee's existing Ejadah "
+        "`AccessToken` as a bearer token. Every answer is scoped to "
+        "the employee that token belongs to."
+    ),
+    version=health_routes.SERVICE_VERSION,
+    lifespan=lifespan,
+    # The schema describes internal structure, so it is only served
+    # outside production.
+    docs_url=None if settings.is_production else "/docs",
+    redoc_url=None,
+    openapi_url=None if settings.is_production else "/openapi.json"
 )
+
+
+# ------------------------------------------------------------------
+# Middleware
+# ------------------------------------------------------------------
+
+if settings.allowed_hosts and settings.allowed_hosts != ["*"]:
+
+    app.add_middleware(
+        TrustedHostMiddleware,
+        allowed_hosts=settings.allowed_hosts
+    )
+
 app.add_middleware(
     CORSMiddleware,
-    # The Flutter mobile app has no browser origin, so CORS does
-    # not apply to it. These entries are for the web build and
-    # local tooling. Tighten this list before production.
-    allow_origins=[
-        "http://localhost:3000",
-        "http://localhost:5173",
-        "http://localhost:8080"
+    # The mobile app is not a browser, so CORS never applies to it.
+    # This list is for the web build and local tooling only.
+    allow_origins=settings.cors_allow_origins,
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+    allow_headers=[
+        "Authorization",
+        "Content-Type",
+        "X-Employee-Id",
+        "X-Session-Id",
     ],
-    allow_credentials=True,
-    allow_methods=["POST", "GET", "OPTIONS"],
-    allow_headers=["Authorization", "Content-Type"]
+    max_age=600
 )
 
+app.add_middleware(GZipMiddleware, minimum_size=1024)
 
-sio = socketio.AsyncServer(
-    async_mode="asgi",
-    cors_allowed_origins="*"
-)
 
-@sio.event
-async def connect(sid, environ, auth):
-
-    print("\n========================================")
-    print("[SOCKET CONNECT]")
-    print("========================================")
-
-    print(f"Socket ID : {sid}")
-    print(f"Auth      : {auth}")
-
-    if not auth:
-
-        print("[SOCKET AUTH] Missing authentication")
-
-        return False
-
-    token = auth.get("token")
-
-    if not token:
-
-        print("[SOCKET AUTH] Missing token")
-
-        return False
-
-    try:
-
-        # TEMPORARY FOR DEMO
-        # Replace with your real AuthService validation.
-
-        user_id = AuthService.authenticate_token(
-            token
-        )
-
-        print(
-            f"[SOCKET AUTH] "
-            f"Authenticated User: {user_id}"
-        )
-
-        await sio.save_session(
-            sid,
-            {
-                "user_id": user_id
-            }
-        )
-
-        return True
-
-    except Exception as e:
-
-        print(
-            f"[SOCKET AUTH ERROR] "
-            f"{type(e).__name__}: {e}"
-        )
-
-        return False
-
-@sio.event
-async def disconnect(sid):
-
-    print("\n========================================")
-    print("[SOCKET DISCONNECT]")
-    print("========================================")
-
-    print(
-        f"Socket ID : {sid}"
-    )
-    
-@sio.event
-async def chat(sid, data):
-
-    print("\n========================================")
-    print("[SOCKET CHAT]")
-    print("========================================")
-
-    print(f"Socket ID : {sid}")
-    print(f"Data      : {data}")
-
-    try:
-
-        # --------------------------------
-        # Get authenticated socket session
-        # --------------------------------
-
-        session = await sio.get_session(sid)
-
-        user_id = session.get("user_id")
-
-        if not user_id:
-
-            await sio.emit(
-                "chat_error",
-                {
-                    "message": "User authentication failed."
-                },
-                to=sid
-            )
-
-            return
-
-        # --------------------------------
-        # Read request
-        # --------------------------------
-
-        question = data.get(
-            "question",
-            ""
-        ).strip()
-
-        session_id = data.get(
-            "session_id",
-            sid
-        )
-
-        if not question:
-
-            await sio.emit(
-                "chat_error",
-                {
-                    "message": "Question cannot be empty."
-                },
-                to=sid
-            )
-
-            return
-
-        print(
-            f"User ID    : {user_id}"
-        )
-
-        print(
-            f"Question   : {question}"
-        )
-
-        print(
-            f"Session ID : {session_id}"
-        )
-
-        # --------------------------------
-        # Rate limiting
-        # --------------------------------
-
-        if not rate_limiter.check(user_id):
-
-            await sio.emit(
-                "chat_error",
-                {
-                    "message":
-                    "Rate limit exceeded. Please try again later."
-                },
-                to=sid
-            )
-
-            return
-
-        # --------------------------------
-        # Process Chat
-        # --------------------------------
-
-        response = await asyncio.to_thread(
-            chat_service.ask,
-            question=question,
-            user_id=user_id,
-            session_id=session_id
-        )
-
-        # --------------------------------
-        # Token information
-        # --------------------------------
-
-        prompt_tokens = None
-        completion_tokens = None
-        total_tokens = None
-
-        if response.llm_response:
-
-            prompt_tokens = (
-                response.llm_response.prompt_tokens
-            )
-
-            completion_tokens = (
-                response.llm_response.completion_tokens
-            )
-
-            total_tokens = (
-                response.llm_response.total_tokens
-            )
-
-        # --------------------------------
-        # Debug
-        # --------------------------------
-
-        print("\n========================================")
-        print("[SOCKET RESPONSE]")
-        print("========================================")
-
-        print(
-            f"User ID          : {user_id}"
-        )
-
-        print(
-            f"Session ID       : {session_id}"
-        )
-
-        print(
-            f"Question         : {question}"
-        )
-
-        print(
-            f"Answer           : {response.answer}"
-        )
-
-        print(
-            f"Guardrail Status : "
-            f"{response.guardrail_status}"
-        )
-
-        print(
-            f"Guardrail Reason : "
-            f"{response.guardrail_reason}"
-        )
-
-        print(
-            f"Prompt Tokens    : {prompt_tokens}"
-        )
-
-        print(
-            f"Completion Tokens: {completion_tokens}"
-        )
-
-        print(
-            f"Total Tokens     : {total_tokens}"
-        )
-
-        print("========================================")
-
-        # --------------------------------
-        # Send response to Flutter
-        # --------------------------------
-
-        await sio.emit(
-            "chat_response",
-            {
-                "answer": response.answer,
-
-                "session_id": session_id,
-
-                "user_id": user_id,
-
-                "guardrail_status":
-                    response.guardrail_status,
-
-                "guardrail_reason":
-                    response.guardrail_reason,
-
-                "prompt_tokens":
-                    prompt_tokens,
-
-                "completion_tokens":
-                    completion_tokens,
-
-                "total_tokens":
-                    total_tokens
-            },
-            to=sid
-        )
-
-    except Exception as e:
-
-        print(
-            f"[SOCKET CHAT ERROR] "
-            f"{type(e).__name__}: {e}"
-        )
-
-        await sio.emit(
-            "chat_error",
-            {
-                "message":
-                "Unable to process your request."
-            },
-            to=sid
-        )
-        
-# --------------------------------------------------
-# Initialize Components
-# --------------------------------------------------
-
-embedding_model = EmbeddingModel()
-
-vector_db = VectorDatabase()
-
-retriever = Retriever(
-    embedding_model=embedding_model,
-    vector_db=vector_db
-)
-
-prompt_builder = PromptBuilder()
-
-
-# Query rewriting LLM
-rewrite_llm = GroqLLM(
-    model="openai/gpt-oss-20b"
-)
-
-
-# Answer generation LLM
-answer_llm = GroqLLM(
-    model="openai/gpt-oss-120b"
-)
-
-
-query_rewriter = QueryRewriter(
-    llm=rewrite_llm
-)
-
-
-memory = ChatMemory()
-
-
-guardrails = GuardrailService(
-    scope_llm=rewrite_llm
-)
-guardrail_logger = GuardrailLogger()
-
-
-context_checker = ContextChecker(
-    llm=rewrite_llm
-)
-
-
-hr_query_store = HRQueryStore()
-memory_manager = MemoryManager()
-rate_limiter = RateLimiter(
-    max_requests=10,
-    window_seconds=60
-)
-language_detector = LanguageDetector()
-query_translator = QueryTranslator(
-    llm=rewrite_llm
-)
-
-employee_data_service = EmployeeDataService()
-
-# --------------------------------------------------
-# Chat Service
-# --------------------------------------------------
-
-chat_service = ChatService(
-    retriever=retriever,
-    prompt_builder=prompt_builder,
-    llm=answer_llm,
-    memory_manager=memory_manager,
-    query_rewriter=query_rewriter,
-    guardrails=guardrails,
-    guardrail_logger=guardrail_logger,
-    context_checker=context_checker,
-    hr_query_store=hr_query_store,
-    language_detector=language_detector,
-    query_translator=query_translator
-)
-
-
-# --------------------------------------------------
-# Health Check
-# --------------------------------------------------
-
-@app.get("/health")
-def health_check():
-
-    return {
-        "status": "ok",
-        "service": "HR AI Chatbot"
-    }
-
-
-# --------------------------------------------------
-# Authentication
-# --------------------------------------------------
-
-@app.post(
-    "/api/login",
-    response_model=LoginResponse
-)
-def login(request: LoginRequest):
+@app.middleware("http")
+async def access_log(request: Request, call_next):
     """
-    Employees log in with their employee ID and password.
-
-    Demo credentials:
-        employee-001 / Test@123
-        employee-002 / Test@123
-
-    The returned token is used both as the REST Bearer token and
-    in the Socket.IO connection handshake:
-
-        auth: { "token": "<token>" }
+    One line per request: method, path, status, duration and (once
+    authenticated) the employee. Query strings are not logged - a
+    mistyped client could put something sensitive there.
     """
 
-    print("\n========================================")
-    print("[LOGIN]")
-    print("========================================")
-    print(f"Employee ID : {request.employee_id}")
+    started = time.perf_counter()
 
-    try:
+    response = await call_next(request)
 
-        token = AuthService.login(
-            employee_id=request.employee_id,
-            password=request.password
-        )
+    duration_ms = (time.perf_counter() - started) * 1000
 
-    except ValueError as error:
+    employee = getattr(request.state, "employee_id", "-")
 
-        print(f"[LOGIN] Rejected: {error}")
+    logger.info(
+        "%s %s -> %s | %.0fms | employee=%s",
+        request.method,
+        request.url.path,
+        response.status_code,
+        duration_ms,
+        employee
+    )
 
-        raise HTTPException(
-            status_code=401,
-            detail="Invalid employee ID or password"
-        )
+    # Sensible defaults for a JSON API served over TLS.
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "no-referrer")
+    response.headers.setdefault("Cache-Control", "no-store")
 
-    # Look up the display details so the app can greet the user
-    profile = employee_data_service.get_profile(
-        request.employee_id
-    ) or {}
+    return response
 
-    print(f"[LOGIN] Token issued for {request.employee_id}")
-    print(f"[LOGIN] Name          : {profile.get('name')}")
-    print("========================================")
 
-    return LoginResponse(
-        token=token,
-        employee_id=request.employee_id,
-        name=profile.get("name"),
-        designation=profile.get("designation"),
-        department=profile.get("department")
+# ------------------------------------------------------------------
+# Routes
+# ------------------------------------------------------------------
+
+app.include_router(health_routes.router)
+app.include_router(auth_routes.router)
+app.include_router(chat_routes.router)
+
+
+# ------------------------------------------------------------------
+# Exception handlers
+# ------------------------------------------------------------------
+
+
+@app.exception_handler(AppError)
+async def handle_app_error(request: Request, exc: AppError):
+
+    logger.warning(
+        "%s on %s: %s",
+        type(exc).__name__,
+        request.url.path,
+        exc.detail or exc.message
+    )
+
+    headers = (
+        {"WWW-Authenticate": "Bearer"}
+        if exc.status_code == 401
+        else None
+    )
+
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"detail": exc.message},
+        headers=headers
     )
 
 
-@app.post("/api/logout")
-def logout(credentials=Depends(security)):
-
-    AuthService.logout(credentials.credentials)
-
-    return {"status": "ok"}
-
-
-@app.get(
-    "/api/me",
-    response_model=MeResponse
-)
-def me(credentials=Depends(security)):
-
-    user_id = AuthService.authenticate(credentials)
-
-    profile = employee_data_service.get_profile(user_id)
-
-    if not profile:
-
-        raise HTTPException(
-            status_code=404,
-            detail="Employee record not found"
-        )
-
-    return MeResponse(
-        employee_id=profile.get("employee_id"),
-        name=profile.get("name"),
-        designation=profile.get("designation"),
-        department=profile.get("department"),
-        manager_name=profile.get("manager_name"),
-        location=profile.get("location")
-    )
-
-# --------------------------------------------------
-# RAG TEST API
-# --------------------------------------------------
-
-@app.post("/api/rag-test")
-def rag_test(
-    request: ChatRequest,
-    credentials=Depends(security)
-):
-
-    print("\n========================================")
-    print("[RAG TEST API]")
-    print("========================================")
-
-    # --------------------------------
-    # Authenticate user
-    # --------------------------------
-
-    user_id = AuthService.authenticate(
-        credentials
-    )
-
-    print(f"User ID  : {user_id}")
-    print(f"Question : {request.question}")
-    print(f"Session  : {request.session_id}")
-
-    # --------------------------------
-    # Run complete ChatService
-    # --------------------------------
-
-    response = chat_service.ask(
-        question=request.question,
-        user_id=user_id,
-        session_id=request.session_id
-    )
-
-    # --------------------------------
-    # Extract retrieved documents
-    # --------------------------------
-
-    documents = []
-
-    for index, document in enumerate(
-        response.source_documents,
-        start=1
-    ):
-
-        documents.append(
-            {
-                "document_number": index,
-                "source": getattr(
-                    document,
-                    "source",
-                    ""
-                ),
-                "content": getattr(
-                    document,
-                    "content",
-                    ""
-                )
-            }
-        )
-
-    # --------------------------------
-    # Token information
-    # --------------------------------
-
-    prompt_tokens = None
-    completion_tokens = None
-    total_tokens = None
-
-    if response.llm_response:
-
-        prompt_tokens = (
-            response.llm_response.prompt_tokens
-        )
-
-        completion_tokens = (
-            response.llm_response.completion_tokens
-        )
-
-        total_tokens = (
-            response.llm_response.total_tokens
-        )
-
-    # --------------------------------
-    # Debug output
-    # --------------------------------
-
-    print("\n[RAG TEST RESULT]")
-
-    print(
-        f"Guardrail Status : "
-        f"{response.guardrail_status}"
-    )
-
-    print(
-        f"Guardrail Reason : "
-        f"{response.guardrail_reason}"
-    )
-
-    print(
-        f"Retrieved Docs   : "
-        f"{len(documents)}"
-    )
-
-    print(
-        f"Answer           : "
-        f"{response.answer}"
-    )
-
-    print(
-        f"Prompt Tokens    : "
-        f"{prompt_tokens}"
-    )
-
-    print(
-        f"Completion Tokens: "
-        f"{completion_tokens}"
-    )
-
-    print(
-        f"Total Tokens     : "
-        f"{total_tokens}"
-    )
-
-    print("========================================")
-
-    # --------------------------------
-    # Return debug response
-    # --------------------------------
-
-    return {
-        "question": request.question,
-
-        "session_id": request.session_id,
-
-        "user_id": user_id,
-
-        "answer": response.answer,
-
-        "guardrail_status":
-            response.guardrail_status,
-
-        "guardrail_reason":
-            response.guardrail_reason,
-
-        "retrieved_document_count":
-            len(documents),
-
-        "retrieved_documents":
-            documents,
-
-        "prompt_tokens":
-            prompt_tokens,
-
-        "completion_tokens":
-            completion_tokens,
-
-        "total_tokens":
-            total_tokens
-    }
-
-
-# --------------------------------------------------
-# Chat API
-# --------------------------------------------------
-
-# @app.post(
-#     "/api/chat",
-#     response_model=ChatResponseSchema
-# )
-# def chat_endpoint(
-#     request: ChatRequest,
-#     credentials=Depends(security)
-# ):
-
-#     # --------------------------------
-#     # 1. Authenticate user
-#     # --------------------------------
-
-#     user_id = AuthService.authenticate(
-#         credentials
-#     )
-#     if not rate_limiter.check(user_id):
-
-#         raise HTTPException(
-#             status_code=429,
-#             detail="Rate limit exceeded. Please try again later."
-#         )
-#     # --------------------------------
-#     # 2. Create user-scoped session
-#     # --------------------------------
-
-#     scoped_session_id = (
-#         SessionManager.get_scoped_session_id(
-#             user_id=user_id,
-#             session_id=request.session_id
-#         )
-#     )
-
-#     # --------------------------------
-#     # 3. Send request to ChatService
-#     # --------------------------------
-
-#     response = chat.ask(
-#         question=request.question,
-#         user_id=user_id,
-#         session_id=request.session_id
-#     )
-
-#     # --------------------------------
-#     # 4. Token information
-#     # --------------------------------
-
-#     prompt_tokens = None
-#     completion_tokens = None
-#     total_tokens = None
-
-#     if response.llm_response:
-
-#         prompt_tokens = (
-#             response.llm_response.prompt_tokens
-#         )
-
-#         completion_tokens = (
-#             response.llm_response.completion_tokens
-#         )
-
-#         total_tokens = (
-#             response.llm_response.total_tokens
-#         )
-
-#     # --------------------------------
-#     # 5. Return response
-#     # --------------------------------
-
-#     return ChatResponseSchema(
-#         answer=response.answer,
-#         session_id=request.session_id,
-#         guardrail_status=response.guardrail_status,
-#         guardrail_reason=response.guardrail_reason,
-#         prompt_tokens=prompt_tokens,
-#         completion_tokens=completion_tokens,
-#         total_tokens=total_tokens
-#     )
-    
-@app.exception_handler(Exception)
-async def global_exception_handler(
+@app.exception_handler(RequestValidationError)
+async def handle_validation_error(
     request: Request,
-    exc: Exception
+    exc: RequestValidationError
 ):
 
-    print(
-        f"Unhandled error: {type(exc).__name__}: {exc}"
+    # Pydantic's default body echoes the input back, which for this
+    # service means echoing the employee's question into an error
+    # payload. Log it, return a fixed message.
+    logger.info(
+        "Validation failure on %s: %s",
+        request.url.path,
+        exc.errors()
+    )
+
+    return JSONResponse(
+        status_code=422,
+        content={
+            "detail": (
+                "The request could not be processed. Please check "
+                "your question and try again."
+            )
+        }
+    )
+
+
+@app.exception_handler(StarletteHTTPException)
+async def handle_http_exception(
+    request: Request,
+    exc: StarletteHTTPException
+):
+
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"detail": exc.detail},
+        headers=getattr(exc, "headers", None)
+    )
+
+
+@app.exception_handler(Exception)
+async def handle_unexpected(request: Request, exc: Exception):
+
+    logger.exception(
+        "Unhandled %s on %s",
+        type(exc).__name__,
+        request.url.path
     )
 
     return JSONResponse(
         status_code=500,
-        content={
-            "detail": "An internal server error occurred."
-        }
+        content={"detail": "An internal server error occurred."}
     )
-    
-    
-socket_app = socketio.ASGIApp(
-    sio,
-    app
-)
+
+
+# ------------------------------------------------------------------
+# Combined ASGI app (REST + Socket.IO on one port)
+# ------------------------------------------------------------------
+
+socket_app = socketio.ASGIApp(sio, app)

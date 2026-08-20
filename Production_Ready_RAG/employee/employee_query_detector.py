@@ -183,8 +183,51 @@ class EmployeeQueryDetector:
         r"\bhow long\b",
     ]
 
+    # ------------------------------------------------------------
+    # Letter requests (Ejadah "Letter" service)
+    # ------------------------------------------------------------
+
+    LETTER_KEYWORDS = [
+        r"\bletter\b",
+        r"\bletters\b",
+        r"\bsalary certificate\b",
+        r"\bemployment certificate\b",
+        r"\bexperience certificate\b",
+        r"\bexperience letter\b",
+        r"\bnoc\b",
+        r"\bno objection\b",
+        r"\bembassy letter\b",
+        r"\bbank letter\b",
+        r"\bvisa letter\b",
+        r"\bconsulate\b",
+    ]
+
+    # ------------------------------------------------------------
+    # Personal documents (passport / visa / Emirates ID)
+    # ------------------------------------------------------------
+
+    DOCUMENT_KEYWORDS = [
+        r"\bpassport\b",
+        r"\bvisa\b",
+        r"\bemirates id\b",
+        r"\bemiratesid\b",
+        r"\beid\b",
+        r"\blabour card\b",
+        r"\blabor card\b",
+        r"\bwork permit\b",
+        r"\bresidence\b",
+        r"\biqama\b",
+        r"\bexpiry\b",
+        r"\bexpires\b",
+        r"\bexpiring\b",
+        r"\binsurance\b",
+        r"\bmedical card\b",
+    ]
+
     TOPIC_MAP = [
         ("salary", SALARY_KEYWORDS),
+        ("letters", LETTER_KEYWORDS),
+        ("documents", DOCUMENT_KEYWORDS),
         ("leave_history", LEAVE_HISTORY_KEYWORDS),
         ("leave_balance", LEAVE_BALANCE_KEYWORDS),
         ("profile", PROFILE_KEYWORDS),
@@ -215,6 +258,13 @@ class EmployeeQueryDetector:
         r"\bwhen did i join\b",
         r"\bhow many leaves do i\b",
         r"\bhow much leave do i\b",
+        r"\bmy passport\b",
+        r"\bmy visa\b",
+        r"\bmy emirates id\b",
+        r"\bmy letters?\b",
+        r"\bmy letter requests?\b",
+        r"\bmy payslip\b",
+        r"\bmy pay slip\b",
     ]
 
     # ============================================================

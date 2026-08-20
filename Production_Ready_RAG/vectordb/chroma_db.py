@@ -16,6 +16,8 @@ class VectorDatabase:
         self.client = chromadb.PersistentClient(
             path=persist_directory
         )
+        
+        self.collection_name = collection_name
 
         self.collection = (
             self.client.get_or_create_collection(
@@ -120,3 +122,29 @@ class VectorDatabase:
             )
 
         return documents
+    
+    def reset_collection(self):
+
+        try:
+            self.client.delete_collection(
+                name=self.collection_name
+            )
+
+            self.collection = (
+                self.client.get_or_create_collection(
+                    name=self.collection_name
+                )
+            )
+
+            print(
+                f"Collection '{self.collection_name}' "
+                "reset successfully."
+            )
+
+        except Exception as error:
+
+            print(
+                f"Error resetting collection: {error}"
+            )
+
+            raise

@@ -1,17 +1,63 @@
-from llm.base_llm import BaseLLM
-from models.chat_response import ChatResponse
+"""
+The chat pipeline.
 
-from guardrails.guardrail_result import GuardrailStatus
-from guardrails.guardrail_logger import GuardrailLogger
+`ask()` takes a VERIFIED `Principal` rather than an employee id
+string. That is the whole security design in one signature: there
+is no way to call this service without having already proved who
+the caller is, and no parameter through which a different employee
+could be named.
 
+Order of the pipeline, and why:
+
+  1. Injection guard      - runs before any HR data is fetched, so a
+                            hijack attempt never reaches the gateway
+  2. Small talk           - answered locally, no LLM, no data
+  3. Query rewrite        - resolves "what about next month?"
+  4. Intent routing       - own record (HR APIs) or policy (RAG)?
+  5. Scope guard          - RAG path only
+  6. Retrieve + verify    - is the answer actually in the documents?
+  7. Generate
+  8. Output guard         - last check before the answer is returned
+  9. Remember             - stored under the employee-scoped key
+"""
+
+from __future__ import annotations
+
+from typing import Any, Dict, List, Optional
+
+from core.errors import (
+    AppError,
+    AuthenticationError,
+    UpstreamUnavailableError,
+)
+from core.logging_config import get_logger, log_personal, mask_employee
 from context_checker.context_checker import ContextChecker
+from employee.employee_query_detector import EmployeeQueryDetector
+from ejadah.identity_service import Principal
+from guardrails.guardrail_logger import GuardrailLogger
+from guardrails.guardrail_result import GuardrailStatus
+from guardrails.output_guard import OutputGuard
 from hr_queries.hr_query_store import HRQueryStore
-
 from language.language_detector import LanguageDetector
 from language.query_translator import QueryTranslator
+from llm.base_llm import BaseLLM
+from models.chat_response import ChatResponse
+from session.session_manager import SessionManager
 
-from employee.employee_query_detector import EmployeeQueryDetector
-from employee.employee_context_builder import EmployeeContextBuilder
+
+logger = get_logger(__name__)
+
+
+UPSTREAM_DOWN_MESSAGE = (
+    "I can't reach the HR system for your details right now. "
+    "Please try again in a moment - the HR policy questions still "
+    "work in the meantime."
+)
+
+GENERIC_FAILURE_MESSAGE = (
+    "Something went wrong while preparing your answer. "
+    "Please try again."
+)
 
 
 class ChatService:
@@ -28,22 +74,22 @@ class ChatService:
         context_checker: ContextChecker,
         hr_query_store: HRQueryStore,
         language_detector: LanguageDetector,
-        query_translator: QueryTranslator
+        query_translator: QueryTranslator,
+        employee_context_provider,
+        output_guard: Optional[OutputGuard] = None,
+        retrieval_top_k: int = 3
     ):
 
-        self.llm = llm
         self.retriever = retriever
         self.prompt_builder = prompt_builder
+        self.llm = llm
 
-        self.employee_context_builder = EmployeeContextBuilder()
-
-        # Persistent conversation memory
         self.memory_manager = memory_manager
-
         self.query_rewriter = query_rewriter
 
         self.guardrails = guardrails
         self.guardrail_logger = guardrail_logger
+        self.output_guard = output_guard or OutputGuard()
 
         self.context_checker = context_checker
         self.hr_query_store = hr_query_store
@@ -51,308 +97,264 @@ class ChatService:
         self.language_detector = language_detector
         self.query_translator = query_translator
 
-    # ================================================================
+        self.employee_context_provider = employee_context_provider
+
+        self.retrieval_top_k = retrieval_top_k
+
+    # ==============================================================
     # Main entry point
-    # ================================================================
+    # ==============================================================
 
     def ask(
         self,
         question: str,
-        user_id: str,
+        principal: Principal,
         session_id: str = "default-session"
-    ):
+    ) -> ChatResponse:
 
-        # ------------------------------------------------------------
-        # 1. Detect user language
-        # ------------------------------------------------------------
+        employee_id = principal.employee_id
+
+        session_id = SessionManager.validate(session_id)
+
+        memory_key = SessionManager.scope(employee_id, session_id)
+
+        logger.info(
+            "Chat request | employee=%s session=%s length=%s",
+            mask_employee(employee_id),
+            session_id,
+            len(question or "")
+        )
+
+        log_personal(logger, "Question: %s", question)
 
         language = self.language_detector.detect_language(question)
 
-        # ------------------------------------------------------------
-        # 2. Session-specific memory
-        # ------------------------------------------------------------
-
         history = self.memory_manager.get_messages(
-            user_id=user_id,
-            session_id=session_id
+            user_id=employee_id,
+            session_id=memory_key
         )
 
-        # ------------------------------------------------------------
-        # 3. Prompt injection guardrail
-        #    (runs BEFORE any database access)
-        # ------------------------------------------------------------
+        # ----------------------------------------------------------
+        # 1. Prompt injection - before any HR data is touched
+        # ----------------------------------------------------------
 
-        injection_result = self.guardrails.check_injection(question)
+        injection = self.guardrails.check_injection(question)
 
-        if injection_result.status != GuardrailStatus.ALLOW:
+        if injection.status != GuardrailStatus.ALLOW:
 
             self.guardrail_logger.log_blocked(
                 question=question,
-                reason=injection_result.reason
+                reason=injection.reason
+            )
+
+            logger.warning(
+                "Blocked a request from employee=%s | reason=%s",
+                mask_employee(employee_id),
+                injection.reason
             )
 
             return ChatResponse(
-                answer=injection_result.message,
+                answer=injection.message,
                 source_documents=[],
                 llm_response=None,
                 guardrail_status="blocked",
-                guardrail_reason=injection_result.reason
+                guardrail_reason=injection.reason
             )
 
-        # ------------------------------------------------------------
-        # 4. General conversation / greeting
-        # ------------------------------------------------------------
+        # ----------------------------------------------------------
+        # 2. Greetings and "what can you do" - no LLM, no data
+        # ----------------------------------------------------------
 
-        general_result = self.guardrails.check_general_conversation(
-            question
-        )
+        small_talk = self.guardrails.check_general_conversation(question)
 
-        if general_result.message:
-
-            print(
-                f"[GENERAL CHAT] "
-                f"Question={question} | "
-                f"Reason={general_result.reason}"
-            )
+        if small_talk.message:
 
             self._remember(
-                user_id,
-                session_id,
+                employee_id,
+                memory_key,
                 question,
-                general_result.message,
+                small_talk.message,
                 language
             )
 
             return ChatResponse(
-                answer=general_result.message,
+                answer=small_talk.message,
                 source_documents=[],
                 llm_response=None,
                 guardrail_status="greeting",
-                guardrail_reason=general_result.reason
+                guardrail_reason=small_talk.reason
             )
 
-        # ------------------------------------------------------------
-        # 5. Query rewriting (resolves follow-up questions)
-        # ------------------------------------------------------------
+        # ----------------------------------------------------------
+        # 3. Rewrite follow-ups into standalone questions
+        # ----------------------------------------------------------
+
+        search_question = question
 
         if history:
 
-            search_question = self.query_rewriter.rewrite(
-                question,
-                history
-            )
+            try:
+                search_question = self.query_rewriter.rewrite(
+                    question,
+                    history
+                ) or question
 
-        else:
+            except Exception as error:
 
-            search_question = question
+                logger.warning(
+                    "Query rewrite failed (%s); using the original "
+                    "question",
+                    type(error).__name__
+                )
 
-        print("\n========================================")
-        print("[CHAT DEBUG]")
-        print("========================================")
-        print(f"Original Question     : {question}")
-        print(f"Session ID            : {session_id}")
-        print(f"User ID               : {user_id}")
-        print(f"Detected Language     : {language}")
-        print(f"History Count         : {len(history)}")
-        print(f"Rewritten Question    : {search_question}")
-        print("========================================\n")
-
-        # ------------------------------------------------------------
-        # 6. INTENT ROUTING
-        #    Is this about the logged-in employee's own record?
-        #
-        #    Detection runs on BOTH the original question and the
-        #    rewritten question, so follow-ups such as
-        #    "what about next month?" are routed correctly.
-        # ------------------------------------------------------------
+        # ----------------------------------------------------------
+        # 4. Intent routing
+        # ----------------------------------------------------------
 
         classification = EmployeeQueryDetector.classify(
             question,
             search_question
         )
 
-        print("========================================")
-        print("[INTENT ROUTER]")
-        print("========================================")
-        print(f"Question          : {question}")
-        print(f"Rewritten         : {search_question}")
-        print(f"Employee Query    : {classification['is_employee_query']}")
-        print(f"Query Types       : {classification['query_types']}")
-        print(f"Reason            : {classification['reason']}")
-        print(
-            "Route             : "
-            + (
-                "EMPLOYEE_DATA"
-                if classification["is_employee_query"]
-                else "HR_KNOWLEDGE (RAG)"
-            )
+        logger.info(
+            "Routing | employee=%s route=%s topics=%s reason=%s",
+            mask_employee(employee_id),
+            "EMPLOYEE_DATA"
+            if classification["is_employee_query"]
+            else "HR_KNOWLEDGE",
+            classification["query_types"],
+            classification["reason"]
         )
-        print("========================================\n")
 
         if classification["is_employee_query"]:
 
-            employee_response = self._answer_employee_question(
+            response = self._answer_from_employee_record(
                 question=question,
                 search_question=search_question,
-                user_id=user_id,
+                principal=principal,
+                memory_key=memory_key,
                 session_id=session_id,
                 language=language,
                 history=history,
                 query_types=classification["query_types"]
             )
 
-            if employee_response is not None:
-                return employee_response
+            if response is not None:
+                return response
 
-            # If the employee record could not be resolved we
-            # deliberately fall through to the RAG pipeline
-            # instead of hard-failing.
+            # The record could not be resolved; fall through to the
+            # knowledge base rather than hard-failing.
 
-        # ------------------------------------------------------------
-        # 7. Scope guardrail (RAG path only)
-        # ------------------------------------------------------------
+        # ----------------------------------------------------------
+        # 5. Scope guard (RAG path only)
+        # ----------------------------------------------------------
 
-        scope_result = self.guardrails.check_scope(search_question)
+        scope = self.guardrails.check_scope(search_question)
 
-        if scope_result.status == GuardrailStatus.GREETING:
+        if scope.status == GuardrailStatus.GREETING:
 
-            greeting_message = (
-                "Hi! How can I help you with your "
-                "HR-related questions?"
+            greeting = (
+                "Hi! How can I help you with your HR-related "
+                "questions?"
             )
 
             self._remember(
-                user_id,
-                session_id,
-                question,
-                greeting_message,
-                language
+                employee_id, memory_key, question, greeting, language
             )
 
             return ChatResponse(
-                answer=greeting_message,
+                answer=greeting,
                 source_documents=[],
                 llm_response=None,
                 guardrail_status="greeting",
-                guardrail_reason=(
-                    "General greeting or chatbot assistance request"
-                )
+                guardrail_reason="General greeting"
             )
 
-        if scope_result.status == GuardrailStatus.OUT_OF_SCOPE:
+        if scope.status == GuardrailStatus.OUT_OF_SCOPE:
 
             self.guardrail_logger.log_out_of_scope(
                 question=question,
-                reason=scope_result.reason
+                reason=scope.reason
             )
 
             return ChatResponse(
-                answer=scope_result.message,
+                answer=scope.message,
                 source_documents=[],
                 llm_response=None,
                 guardrail_status="out_of_scope",
-                guardrail_reason=scope_result.reason
+                guardrail_reason=scope.reason
             )
 
-        # ------------------------------------------------------------
-        # 8. Translate query for retrieval
-        # ------------------------------------------------------------
+        # ----------------------------------------------------------
+        # 6. Retrieve
+        # ----------------------------------------------------------
 
-        retrieval_question = self.query_translator.translate_to_english(
-            search_question
-        )
+        retrieval_question = self._translate(search_question)
 
-        print("\n========================================")
-        print("[RETRIEVAL DEBUG]")
-        print("========================================")
-        print(f"Original Question  : {question}")
-        print(f"Search Question    : {search_question}")
-        print(f"Retrieval Question : {retrieval_question}")
-        print("========================================\n")
-
-        # ------------------------------------------------------------
-        # 9. Retrieve documents
-        # ------------------------------------------------------------
-
-        documents = self.retriever.retrieve(retrieval_question)
-
-        self._print_documents(question, documents)
-
-        # ------------------------------------------------------------
-        # 10. Context check
-        # ------------------------------------------------------------
+        documents = self._retrieve(retrieval_question)
 
         answerable = self.context_checker.is_answerable(
             question=retrieval_question,
             documents=documents
         )
 
-        print(
-            f"[CONTEXT RESULT] "
-            f"Question={question} | "
-            f"Answerable={answerable}"
-        )
-
         if not answerable:
 
-            self.hr_query_store.save_query(
-                question=question,
-                session_id=session_id
-            )
+            # Worth knowing what employees are asking that the
+            # knowledge base cannot answer.
+            try:
+                self.hr_query_store.save_query(
+                    question=question,
+                    session_id=session_id
+                )
+
+            except Exception as error:
+
+                logger.warning(
+                    "Could not record an unanswered query: %s: %s",
+                    type(error).__name__,
+                    error
+                )
 
             return ChatResponse(
                 answer=(
-                    "I couldn't find this information in the "
-                    "available HR knowledge base. Your query "
-                    "has been recorded for HR review."
+                    "I couldn't find this in the HR knowledge base. "
+                    "Your question has been recorded for the HR team "
+                    "to review."
                 ),
                 source_documents=documents,
                 llm_response=None,
                 guardrail_status="allow",
-                guardrail_reason=(
-                    "No sufficient information found "
-                    "in knowledge base"
-                )
+                guardrail_reason="Not covered by the knowledge base"
             )
 
-        # ------------------------------------------------------------
-        # 11. Build prompt (original question keeps the language)
+        # ----------------------------------------------------------
+        # 7. Build the prompt
         #
-        #     If the question referred to the user in the first
-        #     person but we could not pin down a specific topic
-        #     ("how much do I get paid?", "can I apply for this?"),
-        #     attach the employee record as well. The scope
-        #     guardrail has already run, so this is safe.
-        # ------------------------------------------------------------
+        # A first-person question with no clear topic ("can I apply
+        # for this?") gets the employee's own record attached as
+        # supporting context, because the answer usually depends on
+        # it. The scope guard has already run, so this is safe.
+        # ----------------------------------------------------------
 
-        soft_employee_context = None
+        soft_context = None
 
         if classification["query_types"]:
 
-            candidate = self.employee_context_builder.build(
-                employee_id=user_id,
-                query_types=classification["query_types"]
+            soft_context = self._try_build_employee_context(
+                principal,
+                classification["query_types"]
             )
 
-            if candidate and candidate.get("found"):
-
-                soft_employee_context = candidate
-
-                print(
-                    f"[INTENT ROUTER] "
-                    f"Attaching employee record as supporting "
-                    f"context (soft match: "
-                    f"{classification['query_types']})"
-                )
-
-        if soft_employee_context:
+        if soft_context and soft_context.get("found"):
 
             messages = self.prompt_builder.build_employee_messages(
                 question=question,
-                employee_context=soft_employee_context["text"],
+                employee_context=soft_context["text"],
                 documents=documents,
                 history=history,
-                language=language
+                language=language,
+                employee_name=principal.employee_name
             )
 
         else:
@@ -364,200 +366,319 @@ class ChatService:
                 language
             )
 
-        # ------------------------------------------------------------
-        # 12. Generate answer
-        # ------------------------------------------------------------
+        # ----------------------------------------------------------
+        # 8. Generate + guard
+        # ----------------------------------------------------------
 
-        llm_response = self.llm.generate(messages)
+        return self._generate_and_guard(
+            messages=messages,
+            question=question,
+            principal=principal,
+            memory_key=memory_key,
+            language=language,
+            documents=documents,
+            guardrail_reason="Answered from the HR knowledge base"
+        )
 
-        answer = (llm_response.content or "").strip()
+    # ==============================================================
+    # Employee-record path
+    # ==============================================================
 
-        if not answer:
+    def _answer_from_employee_record(
+        self,
+        question: str,
+        search_question: str,
+        principal: Principal,
+        memory_key: str,
+        session_id: str,
+        language: str,
+        history: List[Dict[str, Any]],
+        query_types: List[str]
+    ) -> Optional[ChatResponse]:
+        """
+        Returns a ChatResponse, or None when the record could not be
+        resolved so the caller can fall back to the knowledge base.
+        """
 
-            answer = (
-                "I'm sorry, I couldn't generate an answer just "
-                "now. Please try asking again."
+        try:
+            context = self.employee_context_provider.build_context(
+                principal,
+                query_types
             )
 
-        # ------------------------------------------------------------
-        # 13. Save conversation
-        # ------------------------------------------------------------
+        except AuthenticationError:
+            # A dead token must surface as a 401, not as an answer.
+            raise
 
-        self._remember(
-            user_id,
-            session_id,
-            question,
-            answer,
-            language
-        )
+        except UpstreamUnavailableError as error:
 
-        return ChatResponse(
-            answer=answer,
-            source_documents=documents,
-            llm_response=llm_response,
-            guardrail_status="allow",
-            guardrail_reason="Request passed guardrails"
-        )
+            logger.warning(
+                "HR gateway unavailable for employee=%s: %s",
+                mask_employee(principal.employee_id),
+                error.detail or error.message
+            )
 
-    # ================================================================
-    # Employee-specific answering path
-    # ================================================================
+            return ChatResponse(
+                answer=UPSTREAM_DOWN_MESSAGE,
+                source_documents=[],
+                llm_response=None,
+                guardrail_status="upstream_unavailable",
+                guardrail_reason="HR system did not respond"
+            )
 
-    def _answer_employee_question(
-        self,
-        question,
-        search_question,
-        user_id,
-        session_id,
-        language,
-        history,
-        query_types
-    ):
-        """
-        Returns a ChatResponse, or None if the employee record
-        could not be resolved (caller then falls back to RAG).
-        """
+        except AppError as error:
 
-        print("========================================")
-        print("[EMPLOYEE QUERY]")
-        print("========================================")
-        print(f"Employee ID : {user_id}")
-        print(f"Question    : {question}")
-        print(f"Query Types : {query_types}")
+            logger.error(
+                "Could not build the employee context for "
+                "employee=%s: %s",
+                mask_employee(principal.employee_id),
+                error.detail or error.message
+            )
 
-        employee_context = self.employee_context_builder.build(
-            employee_id=user_id,
-            query_types=query_types
-        )
+            return ChatResponse(
+                answer=error.message,
+                source_documents=[],
+                llm_response=None,
+                guardrail_status="error",
+                guardrail_reason="Employee context unavailable"
+            )
 
-        if not employee_context or not employee_context.get("found"):
+        if not context or not context.get("found"):
 
-            print(
-                f"[EMPLOYEE QUERY] "
-                f"No employee record found for '{user_id}'. "
-                f"Falling back to the HR knowledge base."
+            logger.info(
+                "No HR record resolved for employee=%s; falling back "
+                "to the knowledge base",
+                mask_employee(principal.employee_id)
             )
 
             return None
 
-        print("[EMPLOYEE QUERY] Record found. Context sent to LLM:")
-        print("----------------------------------------")
-        print(employee_context["text"])
-        print("----------------------------------------")
+        log_personal(
+            logger,
+            "Employee context for %s:\n%s",
+            principal.employee_id,
+            context["text"]
+        )
 
-        # ------------------------------------------------------------
-        # Also pull policy documents so hybrid questions work, e.g.
-        # "how many casual leaves are left and what is the policy?"
-        # ------------------------------------------------------------
-
+        # Pull policy documents too, so hybrid questions work:
+        # "how many leaves are left and what is the policy?"
         documents = []
 
         try:
-
-            retrieval_question = (
-                self.query_translator.translate_to_english(
-                    search_question
-                )
-            )
-
-            documents = self.retriever.retrieve(retrieval_question)
-
-            print(
-                f"[EMPLOYEE QUERY] "
-                f"Supporting policy documents: {len(documents)}"
+            documents = self._retrieve(
+                self._translate(search_question)
             )
 
         except Exception as error:
 
-            print(
-                f"[EMPLOYEE QUERY] "
-                f"Policy retrieval skipped: "
-                f"{type(error).__name__}: {error}"
+            logger.warning(
+                "Policy retrieval skipped for an employee question: "
+                "%s: %s",
+                type(error).__name__,
+                error
             )
-
-            documents = []
-
-        # ------------------------------------------------------------
-        # Build the employee prompt and answer
-        # ------------------------------------------------------------
 
         messages = self.prompt_builder.build_employee_messages(
             question=question,
-            employee_context=employee_context["text"],
+            employee_context=context["text"],
             documents=documents,
             history=history,
-            language=language
+            language=language,
+            employee_name=principal.employee_name
         )
 
-        llm_response = self.llm.generate(messages)
+        return self._generate_and_guard(
+            messages=messages,
+            question=question,
+            principal=principal,
+            memory_key=memory_key,
+            language=language,
+            documents=documents,
+            guardrail_reason=(
+                "Answered from the authenticated employee's own "
+                "HR record"
+            )
+        )
 
-        answer = (llm_response.content or "").strip()
+    # ==============================================================
+    # Generation
+    # ==============================================================
 
-        if not answer:
+    def _generate_and_guard(
+        self,
+        messages: List[Dict[str, str]],
+        question: str,
+        principal: Principal,
+        memory_key: str,
+        language: str,
+        documents: list,
+        guardrail_reason: str
+    ) -> ChatResponse:
 
-            answer = (
-                "I'm sorry, I couldn't generate an answer just "
-                "now. Please try asking again."
+        try:
+            llm_response = self.llm.generate(messages)
+
+        except Exception as error:
+
+            logger.error(
+                "LLM generation failed for employee=%s: %s: %s",
+                mask_employee(principal.employee_id),
+                type(error).__name__,
+                error
             )
 
-        print("[EMPLOYEE QUERY] Answer generated from database data.")
+            return ChatResponse(
+                answer=GENERIC_FAILURE_MESSAGE,
+                source_documents=documents,
+                llm_response=None,
+                guardrail_status="error",
+                guardrail_reason="Answer generation failed"
+            )
+
+        raw_answer = (llm_response.content or "").strip()
+
+        verdict = self.output_guard.check(
+            answer=raw_answer,
+            employee_id=principal.employee_id,
+            question=question
+        )
+
+        answer = verdict.answer
+
+        status = "allow"
+
+        reason = guardrail_reason
+
+        if verdict.blocked:
+            status = "output_blocked"
+            reason = verdict.reason or "Blocked by the output guard"
+
+        elif verdict.modified:
+            reason = f"{guardrail_reason} (identifiers masked)"
 
         self._remember(
-            user_id,
-            session_id,
+            principal.employee_id,
+            memory_key,
             question,
             answer,
             language
         )
 
+        log_personal(logger, "Answer: %s", answer)
+
         return ChatResponse(
             answer=answer,
             source_documents=documents,
             llm_response=llm_response,
-            guardrail_status="allow",
-            guardrail_reason=(
-                "Answered from the authenticated employee's "
-                "own HR record"
-            )
+            guardrail_status=status,
+            guardrail_reason=reason
         )
 
-    # ================================================================
+    # ==============================================================
     # Helpers
-    # ================================================================
+    # ==============================================================
+
+    def _try_build_employee_context(
+        self,
+        principal: Principal,
+        query_types: List[str]
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Best-effort variant used on the RAG path. A failure here
+        must not cost the employee their policy answer.
+        """
+
+        try:
+            return self.employee_context_provider.build_context(
+                principal,
+                query_types
+            )
+
+        except AuthenticationError:
+            raise
+
+        except Exception as error:
+
+            logger.info(
+                "Supporting employee context unavailable "
+                "(%s); answering from policy only",
+                type(error).__name__
+            )
+
+            return None
+
+    def _translate(self, question: str) -> str:
+
+        try:
+            return (
+                self.query_translator.translate_to_english(question)
+                or question
+            )
+
+        except Exception as error:
+
+            logger.warning(
+                "Translation failed (%s); retrieving with the "
+                "original text",
+                type(error).__name__
+            )
+
+            return question
+
+    def _retrieve(self, question: str) -> list:
+
+        try:
+            documents = self.retriever.retrieve(
+                question,
+                k=self.retrieval_top_k
+            )
+
+        except Exception as error:
+
+            logger.error(
+                "Retrieval failed: %s: %s",
+                type(error).__name__,
+                error
+            )
+
+            return []
+
+        logger.debug("Retrieved %s document(s)", len(documents))
+
+        return documents
 
     def _remember(
         self,
-        user_id,
-        session_id,
-        question,
-        answer,
-        language
-    ):
+        employee_id: str,
+        memory_key: str,
+        question: str,
+        answer: str,
+        language: str
+    ) -> None:
 
-        self.memory_manager.add_user_message(
-            user_id=user_id,
-            session_id=session_id,
-            content=question,
-            language=language
-        )
+        try:
+            self.memory_manager.add_user_message(
+                user_id=employee_id,
+                session_id=memory_key,
+                content=question,
+                language=language
+            )
 
-        self.memory_manager.add_assistant_message(
-            user_id=user_id,
-            session_id=session_id,
-            content=answer,
-            language=language
-        )
+            self.memory_manager.add_assistant_message(
+                user_id=employee_id,
+                session_id=memory_key,
+                content=answer,
+                language=language
+            )
 
-    @staticmethod
-    def _print_documents(question, documents):
+        except Exception as error:
 
-        print("\n========================================")
-        print("[RAG DEBUG]")
-        print("========================================")
-        print(f"Question          : {question}")
-        print(f"Retrieved Docs    : {len(documents)}")
-
-        for index, document in enumerate(documents):
-            print(f"Document {index + 1}: {document}")
-
-        print("========================================\n")
+            # Losing history is annoying; failing the answer the
+            # employee already waited for is worse.
+            logger.error(
+                "Could not persist conversation memory for "
+                "employee=%s: %s: %s",
+                mask_employee(employee_id),
+                type(error).__name__,
+                error
+            )

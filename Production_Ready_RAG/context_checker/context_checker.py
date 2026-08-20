@@ -1,4 +1,8 @@
+from core.logging_config import get_logger, log_personal
 from llm.base_llm import BaseLLM
+
+
+logger = get_logger(__name__)
 
 
 class ContextChecker:
@@ -15,11 +19,12 @@ class ContextChecker:
         documents: list
     ) -> bool:
 
-        print("\n========================================")
-        print("[CONTEXT CHECK DEBUG]")
-        print("========================================")
-        print(f"Question       : {question}")
-        print(f"Documents      : {len(documents)}")
+        log_personal(
+            logger,
+            "Context check | question=%s documents=%s",
+            question,
+            len(documents)
+        )
 
         # --------------------------------
         # No documents retrieved
@@ -27,7 +32,7 @@ class ContextChecker:
 
         if not documents:
 
-            print("[CONTEXT CHECK] No documents retrieved")
+            logger.debug("Context check: nothing retrieved")
             return False
 
         # --------------------------------
@@ -43,16 +48,15 @@ class ContextChecker:
             if content and content.strip():
                 valid_documents.append(content.strip())
 
-        print(
-            f"[CONTEXT CHECK] "
-            f"Valid documents: {len(valid_documents)}"
+        logger.debug(
+            "Context check: %s usable document(s)",
+            len(valid_documents)
         )
 
         if not valid_documents:
 
-            print(
-                "[CONTEXT CHECK] "
-                "Documents contain no usable content"
+            logger.debug(
+                "Context check: retrieved documents were empty"
             )
 
             return False
@@ -99,9 +103,10 @@ Return ONLY the single word YES or NO.
 
             result = raw_result.upper()
 
-            print(
-                f"[CONTEXT CHECK] "
-                f"Raw Response={repr(raw_result)}"
+            log_personal(
+                logger,
+                "Context check raw response=%r",
+                raw_result
             )
 
             # --------------------------------
@@ -110,20 +115,18 @@ Return ONLY the single word YES or NO.
 
             decision = self._parse(result)
 
-            print(f"[CONTEXT CHECK] Parsed Result={repr(decision)}")
+            logger.debug("Context check decision=%r", decision)
 
             if decision is True:
-                print("[CONTEXT CHECK] Answerable = TRUE")
                 return True
 
             if decision is False:
-                print("[CONTEXT CHECK] Answerable = FALSE")
                 return False
 
-            print(
-                "[CONTEXT CHECK] "
-                "Unexpected response. "
-                "Falling back to retrieved documents."
+            logger.warning(
+                "Context check returned %r; trusting the retrieved "
+                "documents instead",
+                raw_result
             )
 
             # We already have usable documents, so let the
@@ -132,9 +135,10 @@ Return ONLY the single word YES or NO.
 
         except Exception as e:
 
-            print(
-                f"[CONTEXT CHECK ERROR] "
-                f"{type(e).__name__}: {e}"
+            logger.error(
+                "Context check failed (%s: %s); failing open",
+                type(e).__name__,
+                e
             )
 
             # Fail open for RAG

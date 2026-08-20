@@ -377,10 +377,30 @@ def main():
         collection_name=COLLECTION_NAME
     )
 
+    # --------------------------------------------------------
+    # Remove existing data from ChromaDB
+    # --------------------------------------------------------
+
+    print()
+    print("Removing existing vector database data...")
+
+    vector_db.reset_collection()
+
+    print("Existing vector database data removed.")
+
+    # --------------------------------------------------------
+    # Add fresh documents
+    # --------------------------------------------------------
+
+    print()
+    print("Adding fresh documents to ChromaDB...")
+
     vector_db.add_documents(
         documents=chunked_documents,
         embeddings=embeddings
     )
+
+    print("Documents added successfully.")
 
     # --------------------------------------------------------
     # 6. Summary
